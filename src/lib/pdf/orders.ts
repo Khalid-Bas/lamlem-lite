@@ -76,6 +76,18 @@ function cleanLine(s: string): string {
   return s.replace(/�/g, "").replace(/\s{2,}/g, " ").trim();
 }
 
+/**
+ * Cleaner for variant text, which deliberately KEEPS the U+FFFD markers.
+ *
+ * Each one stands for a glyph the font could not map back to characters, and
+ * knowing *where* the gaps are is what lets the catalog resolve the real value
+ * later ("نوع الحليب م�وب اوت�" → "مشروب اوتلي"). Stripping them first would
+ * throw away the only positional evidence there is.
+ */
+function cleanOptionLine(s: string): string {
+  return s.replace(/\s{2,}/g, " ").trim();
+}
+
 /** Splits a page's reconstructed lines into one chunk per order number. */
 function splitIntoOrders(lines: string[]): { start: number; end: number }[] {
   const starts: number[] = [];
@@ -188,9 +200,10 @@ function parseOneOrder(lines: string[], page: number): ParsedOrder | null {
       if (!pending) continue;
 
       if (inOptions) {
-        pending.optionText = cleanLine(
-          pending.optionText ? `${pending.optionText} · ${line}` : line,
-        );
+        const raw = cleanOptionLine(lines[i]);
+        pending.optionText = pending.optionText
+          ? `${pending.optionText} · ${raw}`
+          : raw;
       } else {
         // Long product names wrap onto the next line ("وادواتها اسود").
         pending.name = cleanLine(`${pending.name} ${line}`);
@@ -224,7 +237,10 @@ function parseOneOrder(lines: string[], page: number): ParsedOrder | null {
 export function parseOrderPages(pageTexts: string[]): ParsedOrder[] {
   const out: ParsedOrder[] = [];
   pageTexts.forEach((pageText, pi) => {
-    const lines = pageText.split("\n").map(cleanLine).filter(Boolean);
+    // Lines are kept raw here — including the U+FFFD markers — because the
+    // variant handler needs to know where the unmapped glyphs were. Individual
+    // fields are cleaned as they are extracted.
+    const lines = pageText.split("\n").map((l) => l.trim()).filter(Boolean);
     for (const { start, end } of splitIntoOrders(lines)) {
       const order = parseOneOrder(lines.slice(start, end), pi + 1);
       if (order) out.push(order);

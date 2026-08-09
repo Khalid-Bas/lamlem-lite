@@ -51,15 +51,24 @@ img{display:block;max-width:100%}
 
 .main{flex:1;padding:14px;padding-bottom:calc(14px + var(--safe-b));display:flex;flex-direction:column;gap:14px}
 
-/* ─── camera ─── */
-.cam{position:relative;border-radius:16px;overflow:hidden;background:#000;aspect-ratio:3/4;max-height:46dvh}
-.cam.small{aspect-ratio:16/9;max-height:22dvh}
-.cam video{width:100%;height:100%;object-fit:cover}
-.reticle{position:absolute;inset:18% 10%;border:2px solid rgba(255,255,255,.85);border-radius:12px;
-  box-shadow:0 0 0 100vmax rgba(0,0,0,.35)}
+/* ─── scanner: a full-screen overlay, opened only on demand ─── */
+.cam-hidden{position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;inset-block-start:-10px}
+.scanner{position:fixed;inset:0;z-index:60;background:#000;display:flex;flex-direction:column}
+.scanner-cam{position:relative;flex:1;min-height:0;overflow:hidden}
+.scanner-cam video{width:100%;height:100%;object-fit:cover}
+.reticle{position:absolute;inset:26% 8%;border:2px solid rgba(255,255,255,.9);border-radius:14px;
+  box-shadow:0 0 0 100vmax rgba(0,0,0,.45)}
 .reticle::after{content:"";position:absolute;inset-inline:0;top:50%;height:2px;background:var(--stop);opacity:.9}
-.camhint{position:absolute;inset-inline:0;bottom:10px;text-align:center;font-size:12.5px;color:#fff;
-  text-shadow:0 1px 4px rgba(0,0,0,.9)}
+.camhint{position:absolute;inset-inline:0;bottom:12px;text-align:center;font-size:13px;color:#fff;
+  font-weight:600;text-shadow:0 1px 6px rgba(0,0,0,.95)}
+.scanner-foot{flex:none;max-height:52dvh;overflow-y:auto;overscroll-behavior:contain;
+  background:var(--panel);border-top:1px solid var(--line);
+  padding:12px 14px calc(12px + var(--safe-b));display:flex;flex-direction:column;gap:10px}
+
+/* Big primary action standing where the live preview used to sit. */
+.b-scan{background:var(--panel-2);border:1.5px solid var(--line);color:var(--ink);
+  min-height:76px;font-size:18px;border-radius:18px}
+.b-scan:active{background:#2A2E33}
 
 /* ─── product cards: large images, read at arm's length ─── */
 .items{display:flex;flex-direction:column;gap:10px}
@@ -131,6 +140,31 @@ img{display:block;max-width:100%}
 .lrow .t span{display:block;font-size:11.5px;color:var(--ink-3)}
 .lrow .dur{font-size:13px;font-variant-numeric:tabular-nums;color:var(--ink-2);font-weight:600}
 .sheet{position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:50;display:flex;align-items:flex-end}
-.sheet .inner{background:var(--panel);width:100%;max-height:84dvh;overflow:auto;
-  border-radius:20px 20px 0 0;padding:16px 14px calc(16px + var(--safe-b));display:flex;flex-direction:column;gap:12px}
-.grab{width:38px;height:4px;border-radius:2px;background:var(--line);margin:0 auto 4px}
+.sheet .inner{background:var(--panel);width:100%;max-height:88dvh;
+  border-radius:20px 20px 0 0;padding:12px 14px calc(12px + var(--safe-b));
+  display:flex;flex-direction:column;gap:10px;min-height:0}
+.sheet-title{font-size:16px;flex:none}
+.sheet-foot{flex:none;display:flex;flex-direction:column;gap:10px}
+/* min-height:0 is the fix: a flex child defaults to min-height:auto, which
+   refuses to shrink below its content, so overflow never engages and the list
+   simply runs past the bottom of the sheet instead of scrolling. */
+.scrolly{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;touch-action:pan-y;display:flex;flex-direction:column;gap:10px}
+.grab{width:38px;height:4px;border-radius:2px;background:var(--line);margin:0 auto 2px;flex:none}
+.preview{width:100%;border-radius:14px;background:#000;max-height:56dvh}
+.acts{display:flex;gap:6px;flex:none}
+
+/* ─── setup stats ─── */
+.statbox{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.stat b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
+.stat b.bad{color:var(--warn)}
+.stat span{display:block;font-size:11.5px;color:var(--ink-3)}
+
+.flash.ok{background:#0F2418;color:#8FE3B0;border:1px solid #1E4A30}
+.opt.unsure{color:var(--stop)}
+.b-drive{background:#1A73E8;color:#fff}
+.lrow .t span+span{margin-top:1px}
+
+/* Children keep their natural height so the container scrolls them. */
+.scrolly>*{flex:none}

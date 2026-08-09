@@ -37,10 +37,17 @@ const LATIN = /[A-Za-z]/;
 const LINE_TOLERANCE = 3;
 
 /**
- * Gap (relative to glyph width) that implies a word break. Arabic glyphs are
- * emitted adjacent with near-zero gaps, so this stays deliberately small.
+ * Gap that implies a word break, as a fraction of the *font size*.
+ *
+ * Measured on real Salla invoices: gaps between words sit at 0.25 of the font
+ * size, gaps inside a word at 0.00. 0.15 splits them with a wide margin.
+ *
+ * This deliberately does not scale off glyph width. Arabic glyph widths vary
+ * enormously (ا is 1.8pt, ﷲ is 11pt), so a width-based threshold rose above the
+ * real space width next to any wide glyph and silently glued words together —
+ * "استكر شيت من تصميم قوت" came out as "استكر شيتمن تصميم قوت".
  */
-const SPACE_RATIO = 0.28;
+const SPACE_RATIO = 0.15;
 
 function countMatches(s: string, re: RegExp): number {
   return (s.match(re) ?? []).length;
@@ -98,7 +105,9 @@ export function reconstructLines(items: RawItem[]): PositionedLine[] {
         const prevW = prev.width ?? 0;
         const curW = it.width ?? 0;
         const gap = rtl ? prevX - (curX + curW) : curX - (prevX + prevW);
-        const scale = Math.max(prevW, curW, 1);
+        // transform[0] is the horizontal text scale, i.e. the rendered font size.
+        const fontSize = Math.abs(it.transform[0]) || Math.abs(prev.transform[0]) || 10;
+        const scale = fontSize;
         // Salla sets numbers flush against Arabic ("فاخرة50جرام", "164.99SAR").
         // A script change is a word boundary even when the glyphs touch.
         // Break on an Arabic/non-Arabic boundary only. Deliberately *not* on
