@@ -1,0 +1,14 @@
+node_modules
+.next
+out
+.env
+.env.local
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# Test fixtures are generated from real Salla exports and contain customer
+# names, phone numbers and addresses. Regenerate locally:
+#   node scripts/make-fixtures.mjs
+tests/fixtures-catalog.json
+tests/items-*.json
