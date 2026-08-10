@@ -22,6 +22,13 @@ your customer data leaves the device.
 | **Group** | **تجهيز مجموعة طلبات** — scan several labels, start one recording, pack them together, stop, then re-scan each label to confirm. All of them are marked done and share the clip. |
 | **Summary** | Per-order time, customer name, video size, **مشاهدة** to preview in place, **حفظ** to download, and **رفع … فيديو إلى Drive** — available at any time, not only once the batch is finished. |
 
+Tapping an order in **الطلبات** opens a **read-only preview** — items, photos,
+quantities — and never touches the camera. Recording starts only from the
+explicit **ابدأ التعبئة والتسجيل** button inside it. If another order is already
+being packed the button says so and asks first; the running recording keeps
+going while you look. Previewing an order that is already done offers
+**إعادة التعبئة والتسجيل**, which warns that the stored video will be replaced.
+
 Scanning is **only** active while the scanner is on screen. During packing the
 detector is off, so a label lying on the bench cannot end the order or restart
 the recording.

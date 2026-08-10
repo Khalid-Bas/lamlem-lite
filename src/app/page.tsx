@@ -31,6 +31,8 @@ export default function App() {
   const [camError, setCamError] = useState("");
   const [scanFor, setScanFor] = useState<ScanPurpose | null>(null);
   const [sheet, setSheet] = useState<"orders" | "summary" | null>(null);
+  /** Order being previewed from the list. Viewing never starts a recording. */
+  const [preview, setPreview] = useState<PackOrder | null>(null);
   /** Bumped once the camera exists, so the scanning effect can re-run. */
   const [camReady, setCamReady] = useState(0);
 
@@ -375,7 +377,7 @@ export default function App() {
         <div className="bar">
           <i style={{ width: total ? `${(done / total) * 100}%` : "0%" }} />
         </div>
-        {mode === "packing" || mode === "group-recording" ? (
+        {(mode === "packing" || mode === "group-recording") && (
           <>
             <span className="timer">{formatDuration(elapsed)}</span>
             {recording ? (
@@ -384,7 +386,10 @@ export default function App() {
               <span className="chip">بلا فيديو</span>
             )}
           </>
-        ) : (
+        )}
+        {/* Available during packing too: opening the list only previews now, so
+            browsing another order can no longer disturb the recording. */}
+        {mode !== "group-recording" && (
           <button className="chip" onClick={() => setSheet("orders")}>الطلبات</button>
         )}
       </header>
@@ -546,20 +551,17 @@ export default function App() {
       )}
 
       {sheet === "orders" && batch && (
-        <Sheet title="اختر طلبًا" onClose={() => setSheet(null)}>
+        <Sheet title="الطلبات" onClose={() => setSheet(null)}>
+          <p className="note">اضغط على أي طلب لمعاينته قبل بدء التعبئة.</p>
           <div className="list">
             {orders.map((o, i) => (
               <button
                 className="lrow"
                 key={o.id}
-                onClick={() => {
-                  setSheet(null);
-                  void (async () => {
-                    if (currentRef.current) await finishCurrent();
-                    await ensureCamera();
-                    beginOrder(o);
-                  })();
-                }}
+                // Opens a read-only preview. Starting a recording from here
+                // used to happen on the first tap, which could cut short — and
+                // overwrite — a recording already in progress.
+                onClick={() => setPreview(o)}
               >
                 <span className="n">{i + 1}</span>
                 <span className="t">
@@ -574,6 +576,26 @@ export default function App() {
             ))}
           </div>
         </Sheet>
+      )}
+
+      {preview && (
+        <OrderPreview
+          order={preview}
+          packed={packedIds.has(preview.id)}
+          record={batch?.records.find((r) => r.orderId === preview.id)}
+          busyWith={current}
+          onClose={() => setPreview(null)}
+          onStart={() => {
+            const o = preview;
+            setPreview(null);
+            setSheet(null);
+            void (async () => {
+              if (currentRef.current) await finishCurrent();
+              await ensureCamera();
+              beginOrder(o);
+            })();
+          }}
+        />
       )}
 
       {sheet === "summary" && batch && (
@@ -751,6 +773,79 @@ function OrderCard({ order, compact }: { order: PackOrder; compact?: boolean }) 
         ))}
       </div>
     </>
+  );
+}
+
+/* ══════════════ order preview ══════════════ */
+
+/**
+ * Read-only look at an order, opened from the list.
+ *
+ * Deliberately inert: nothing here touches the camera. Recording only ever
+ * starts from the explicit button, and if another order is already being
+ * packed the button says so, because starting a new one closes that recording.
+ */
+function OrderPreview({
+  order, packed, record, busyWith, onClose, onStart,
+}: {
+  order: PackOrder;
+  packed: boolean;
+  record?: PackRecord;
+  busyWith: PackOrder | null;
+  onClose: () => void;
+  onStart: () => void;
+}) {
+  const interrupting = Boolean(busyWith && busyWith.id !== order.id);
+
+  const label = packed
+    ? "إعادة التعبئة والتسجيل"
+    : interrupting
+      ? `أنهِ #${busyWith!.orderNumber} وابدأ هذا`
+      : "ابدأ التعبئة والتسجيل";
+
+  function start() {
+    if (packed && record?.hasVideo) {
+      if (!confirm("سيُستبدل الفيديو المحفوظ لهذا الطلب. متابعة؟")) return;
+    } else if (interrupting) {
+      if (!confirm(`سيتم إنهاء وحفظ الطلب #${busyWith!.orderNumber} أولًا. متابعة؟`)) return;
+    }
+    onStart();
+  }
+
+  return (
+    <Sheet
+      title={`معاينة #${order.orderNumber}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn b-go" onClick={start}>
+            <RecIcon />
+            {label}
+          </button>
+        </>
+      }
+    >
+      {packed && record && (
+        <div className="flash ok">
+          تم تجهيزه · {formatDuration(record.durationMs)}
+          {record.videoBytes ? ` · ${formatBytes(record.videoBytes)}` : " · بلا فيديو"}
+        </div>
+      )}
+      {interrupting && (
+        <div className="flash warn">
+          يجري الآن تجهيز #{busyWith!.orderNumber} — سيُحفظ قبل بدء هذا الطلب.
+        </div>
+      )}
+      <OrderCard order={order} />
+    </Sheet>
+  );
+}
+
+function RecIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="6" fill="currentColor" />
+    </svg>
   );
 }
 
