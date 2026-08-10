@@ -9,10 +9,10 @@ const font = IBM_Plex_Sans_Arabic({
 });
 
 export const metadata: Metadata = {
-  title: "لملم — تجهيز",
+  title: "لَمّ — لتجهيز الطلبات",
   description: "امسح الباركود، شوف المنتجات، سجّل التعبئة.",
   manifest: "/manifest.webmanifest",
-  appleWebApp: { capable: true, title: "لملم" },
+  appleWebApp: { capable: true, title: "لَمّ" },
 };
 
 export const viewport: Viewport = {

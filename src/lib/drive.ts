@@ -153,10 +153,47 @@ export async function uploadFile(
   );
 }
 
-/** "SMSA - 24/08/2026" — carrier plus the day the batch was packed. */
+/** Uploads a small text file, used for the batch manifest. */
+export async function uploadText(
+  token: string,
+  folderId: string,
+  name: string,
+  text: string,
+): Promise<void> {
+  // The BOM makes Excel open the CSV as UTF-8 instead of mangling the Arabic.
+  await uploadFile(
+    token,
+    folderId,
+    name,
+    new Blob(["﻿" + text], { type: "text/csv;charset=utf-8" }),
+  );
+}
+
+/**
+ * "SMSA - 24/08/2026" — carrier plus the day the batch was packed.
+ *
+ * Slashes are legal in Drive names (it has no path syntax), so the date is
+ * kept in the readable form asked for.
+ */
 export function folderName(carrier: string | undefined, when: Date): string {
   const dd = String(when.getDate()).padStart(2, "0");
   const mm = String(when.getMonth() + 1).padStart(2, "0");
   const yyyy = when.getFullYear();
   return `${carrier?.trim() || "Orders"} - ${dd}/${mm}/${yyyy}`;
+}
+
+/**
+ * Makes a string safe to use as a file name.
+ *
+ * Drive itself tolerates most characters, but these files get downloaded onto
+ * Windows and macOS where `\ / : * ? " < > |` are illegal — a name containing
+ * one can fail to save with no useful error.
+ */
+export function safeFileName(s: string, max = 120): string {
+  const cleaned = s
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/[.\s]+$/, "")
+    .trim();
+  return (cleaned || "unnamed").slice(0, max);
 }

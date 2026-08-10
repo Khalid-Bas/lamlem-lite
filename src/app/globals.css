@@ -53,9 +53,15 @@ img{display:block;max-width:100%}
 
 /* ─── scanner: a full-screen overlay, opened only on demand ─── */
 .cam-hidden{position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;inset-block-start:-10px}
-.scanner{position:fixed;inset:0;z-index:60;background:#000;display:flex;flex-direction:column}
-.scanner-cam{position:relative;flex:1;min-height:0;overflow:hidden}
-.scanner-cam video{width:100%;height:100%;object-fit:cover}
+
+/* The live preview: one element for the whole session, restyled rather than
+   remounted when the scanner opens. It sits just under the scanner chrome. */
+.scan-video{position:fixed;inset:0;width:100vw;height:100dvh;object-fit:cover;
+  background:#000;z-index:59}
+.scanner{position:fixed;inset:0;z-index:60;display:flex;flex-direction:column;
+  background:transparent;pointer-events:none}
+.scanner>*{pointer-events:auto}
+.scanner-cam{position:relative;flex:1;min-height:0;overflow:hidden;pointer-events:none}
 .reticle{position:absolute;inset:26% 8%;border:2px solid rgba(255,255,255,.9);border-radius:14px;
   box-shadow:0 0 0 100vmax rgba(0,0,0,.45)}
 .reticle::after{content:"";position:absolute;inset-inline:0;top:50%;height:2px;background:var(--stop);opacity:.9}

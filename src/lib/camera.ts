@@ -54,17 +54,44 @@ export class Camera {
   private detector: BarcodeDetectorLike | null = null;
   private raf = 0;
   private scanning = false;
+  /** Incremented on every stop, to invalidate in-flight detections. */
+  private session = 0;
   /** Codes seen recently, so one physical label is not read ten times a second. */
   private cooldown = new Map<string, number>();
 
-  readonly video: HTMLVideoElement;
+  video: HTMLVideoElement;
 
   constructor(video: HTMLVideoElement) {
     this.video = video;
   }
 
+  /**
+   * Re-points at a different <video> element, moving the live stream with it.
+   *
+   * Defensive: if the element this camera was built around is ever replaced,
+   * the stream would otherwise stay bound to a detached node and the on-screen
+   * preview would render black while the camera light stays on.
+   */
+  attach(video: HTMLVideoElement): void {
+    if (this.video === video) return;
+    this.video = video;
+    if (this.stream) {
+      video.srcObject = this.stream;
+      video.setAttribute("playsinline", "true");
+      video.muted = true;
+      void video.play().catch(() => {});
+    }
+  }
+
   async start(): Promise<void> {
-    if (this.stream) return;
+    if (this.stream) {
+      // Already running: make sure the current element is showing it.
+      if (this.video.srcObject !== this.stream) {
+        this.video.srcObject = this.stream;
+        await this.video.play().catch(() => {});
+      }
+      return;
+    }
     this.stream = await navigator.mediaDevices.getUserMedia({
       // Rear camera, and a resolution high enough to resolve a Code 128 bar
       // pattern without producing enormous video files.
@@ -99,12 +126,21 @@ export class Camera {
   startScanning(onCode: BarcodeHandler, cooldownMs = 2500): void {
     if (!this.detector || this.scanning) return;
     this.scanning = true;
+    const session = ++this.session;
 
     const tick = async () => {
-      if (!this.scanning) return;
+      if (!this.scanning || session !== this.session) return;
       try {
         if (this.video.readyState >= 2) {
           const hits = await this.detector!.detect(this.video);
+
+          // Re-check after the await. detect() takes tens of milliseconds on a
+          // 720p frame, which is easily long enough for the scanner to have
+          // been closed in the meantime. Without this, a detection that landed
+          // after the packer started packing would fire anyway and restart the
+          // order mid-recording.
+          if (!this.scanning || session !== this.session) return;
+
           const now = Date.now();
           for (const hit of hits) {
             const value = hit.rawValue?.trim();
@@ -119,6 +155,7 @@ export class Camera {
       } catch {
         // A dropped frame is not worth surfacing; the next tick retries.
       }
+      if (!this.scanning || session !== this.session) return;
       this.raf = requestAnimationFrame(() => void tick());
     };
     void tick();
@@ -126,8 +163,15 @@ export class Camera {
 
   stopScanning(): void {
     this.scanning = false;
+    // Bumping the session invalidates any in-flight detection, so a promise
+    // that resolves after this call cannot deliver a code.
+    this.session++;
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
+  }
+
+  get isScanning(): boolean {
+    return this.scanning;
   }
 
   /** Clears the debounce so the same label can be scanned again deliberately. */

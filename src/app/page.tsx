@@ -9,7 +9,11 @@ import {
   saveBatch, saveVideo, upsertRecord, usage,
 } from "@/lib/store";
 import { buildAliases, resolveScan } from "@/lib/barcode";
-import { driveConfigured, ensureFolder, folderName, getAccessToken, uploadFile } from "@/lib/drive";
+import { driveConfigured, ensureFolder, folderName, getAccessToken, uploadFile, uploadText, safeFileName } from "@/lib/drive";
+import {
+  primeAudio, cueScanOk, cueScanFail, cueNeutral,
+  cueOrderDone, cueGroupDone, cueBatchDone,
+} from "@/lib/feedback";
 import type { Batch, PackOrder, PackRecord } from "@/lib/types";
 
 type Mode = "setup" | "idle" | "packing" | "group-collect" | "group-recording" | "group-verify";
@@ -27,6 +31,8 @@ export default function App() {
   const [camError, setCamError] = useState("");
   const [scanFor, setScanFor] = useState<ScanPurpose | null>(null);
   const [sheet, setSheet] = useState<"orders" | "summary" | null>(null);
+  /** Bumped once the camera exists, so the scanning effect can re-run. */
+  const [camReady, setCamReady] = useState(0);
 
   // Group session state
   const [groupIds, setGroupIds] = useState<string[]>([]);
@@ -87,9 +93,12 @@ export default function App() {
     if (!videoRef.current) return null;
     const cam = camRef.current ?? new Camera(videoRef.current);
     camRef.current = cam;
+    // Re-bind in case React handed us a different element since last time.
+    cam.attach(videoRef.current);
     try {
       await cam.start();
       setCamError("");
+      setCamReady((n) => n + 1);
       return cam;
     } catch (e) {
       setCamError(
@@ -133,6 +142,9 @@ export default function App() {
       batchRef.current = next;
       setBatch(next);
       void saveBatch(next);
+      // The last order of a batch gets its own, unmistakable flourish.
+      if (next.records.length >= next.orders.length) cueBatchDone();
+      else cueOrderDone();
     }
     setCurrent(null);
   }, []);
@@ -157,11 +169,12 @@ export default function App() {
       const res = resolveScan(raw, aliasesRef.current);
       if (res.kind === "yellow") {
         setFlash({ kind: "bad", text: `باركود غير معروف: ${raw}` });
-        navigator.vibrate?.([90, 60, 90]);
+        cueScanFail();
         return;
       }
       if (res.kind === "orange") {
         setFlash({ kind: "warn", text: "أكثر من طلب يطابق — اختر يدويًا" });
+        cueScanFail();
         return;
       }
 
@@ -173,9 +186,10 @@ export default function App() {
         setGroupIds((ids) => {
           if (ids.includes(order.id)) {
             setFlash({ kind: "warn", text: `#${order.orderNumber} مضاف مسبقًا` });
+            cueNeutral();
             return ids;
           }
-          navigator.vibrate?.(45);
+          cueScanOk();
           setFlash({ kind: "ok", text: `أُضيف #${order.orderNumber}` });
           return [...ids, order.id];
         });
@@ -185,25 +199,29 @@ export default function App() {
       if (m === "group-verify") {
         if (!groupIdsRef.current.includes(order.id)) {
           setFlash({ kind: "bad", text: `#${order.orderNumber} ليس ضمن هذه المجموعة` });
-          navigator.vibrate?.([90, 60, 90]);
+          cueScanFail();
           return;
         }
         setVerified((v) => (v.includes(order.id) ? v : [...v, order.id]));
-        navigator.vibrate?.(45);
+        cueScanOk();
         return;
       }
 
-      // Single-order flow.
+      // Single-order flow. Detection must stop the moment a label resolves —
+      // otherwise it keeps running behind the packing screen and the next
+      // barcode in view would end the order on its own.
       const active = currentRef.current;
+      camRef.current?.stopScanning();
+
       if (active && active.id === order.id) {
-        navigator.vibrate?.(60);
+        cueScanOk();
         await finishCurrent();
         setScanFor(null);
         setMode("idle");
         return;
       }
       if (active) await finishCurrent();
-      navigator.vibrate?.(45);
+      cueScanOk();
       setScanFor(null);
       beginOrder(order);
     },
@@ -215,20 +233,45 @@ export default function App() {
   /* ── the scanner overlay drives detection only while it is open ── */
   const openScanner = useCallback(
     async (purpose: ScanPurpose) => {
+      primeAudio();
       setScanFor(purpose);
       setFlash(null);
-      const cam = await ensureCamera();
-      cam?.resetCooldown();
-      cam?.startScanning((v) => void onCodeRef.current(v));
+      await ensureCamera();
     },
     [ensureCamera],
   );
 
+  /**
+   * Detection is bound to the scanner being open, and to nothing else.
+   *
+   * Driving start/stop from this one effect — rather than imperatively from
+   * each call site — makes it structurally impossible for the detector to be
+   * running while the packer is packing. Previously a missed stop meant a
+   * barcode drifting into view would end the order and restart the recording.
+   */
+  useEffect(() => {
+    const cam = camRef.current;
+    if (!cam) return;
+    if (scanFor) {
+      cam.resetCooldown();
+      cam.startScanning((v) => void onCodeRef.current(v));
+    } else {
+      cam.stopScanning();
+    }
+    return () => cam.stopScanning();
+  }, [scanFor, camReady]);
+
+  /**
+   * Closes the scanner UI and stops detection, but deliberately leaves the
+   * camera stream open for the rest of the batch.
+   *
+   * Tearing the stream down on every close meant each scan had to re-acquire
+   * the camera — several hundred milliseconds on a phone, during which the
+   * preview is black. The stream is released on reset and on unmount instead.
+   */
   const closeScanner = useCallback(() => {
     camRef.current?.stopScanning();
     setScanFor(null);
-    // Idle and not recording: release the camera so nothing stays lit.
-    if (!camRef.current?.isRecording) camRef.current?.stop();
   }, []);
 
   /* ── group session ── */
@@ -300,6 +343,8 @@ export default function App() {
       setMode("idle");
       modeRef.current = "idle";
       setFlash({ kind: "ok", text: `تم تسجيل ${ids.length} طلب` });
+      if (next.records.length >= next.orders.length) cueBatchDone();
+      else cueGroupDone();
     },
     [closeScanner],
   );
@@ -407,10 +452,23 @@ export default function App() {
         )}
       </main>
 
-      {/* ── scanner overlay ── */}
+      {/*
+        The preview element is mounted exactly once, for the whole session, and
+        only restyled when the scanner opens. Rendering a second <video> for the
+        overlay meant the stream stayed attached to the element React had just
+        unmounted, so the camera ran but the preview was black.
+      */}
+      <video
+        ref={videoRef}
+        playsInline
+        muted
+        autoPlay
+        className={scanFor ? "scan-video" : "cam-hidden"}
+      />
+
+      {/* ── scanner chrome, drawn over the preview ── */}
       {scanFor && (
         <ScannerOverlay
-          videoRef={videoRef}
           title={
             scanFor === "group-collect"
               ? `اختيار المجموعة — ${groupIds.length} طلب`
@@ -487,9 +545,6 @@ export default function App() {
         />
       )}
 
-      {/* Keep the element mounted but hidden so the stream survives scans. */}
-      {!scanFor && <video ref={videoRef} playsInline muted className="cam-hidden" />}
-
       {sheet === "orders" && batch && (
         <Sheet title="اختر طلبًا" onClose={() => setSheet(null)}>
           <div className="list">
@@ -555,10 +610,10 @@ export default function App() {
 
 /* ══════════════ scanner overlay ══════════════ */
 
+/** Overlay chrome only — the preview itself is the single hoisted <video>. */
 function ScannerOverlay({
-  videoRef, title, flash, onClose, footer,
+  title, flash, onClose, footer,
 }: {
-  videoRef: React.RefObject<HTMLVideoElement | null>;
   title: string;
   flash: Flash;
   onClose: () => void;
@@ -567,7 +622,6 @@ function ScannerOverlay({
   return (
     <div className="scanner">
       <div className="scanner-cam">
-        <video ref={videoRef} playsInline muted />
         <div className="reticle" />
         <div className="camhint">{title}</div>
       </div>
@@ -756,6 +810,11 @@ function Summary({
 
   const videoKeyOf = (r: PackRecord) => r.videoKey ?? r.orderId;
 
+  // Distinct clips, not records: a group session's orders share one file.
+  const withVideo = new Set(
+    records.filter((r) => r.hasVideo).map((r) => videoKeyOf(r)),
+  ).size;
+
   async function watch(r: PackRecord, label: string) {
     const blob = await loadVideo(videoKeyOf(r));
     if (!blob) return;
@@ -774,6 +833,14 @@ function Summary({
   }
 
   async function uploadAll() {
+    if (!driveConfigured()) {
+      // Explaining the one-time setup beats a silent no-op or a raw error.
+      setUpload({
+        busy: false,
+        msg: "الرفع إلى Drive غير مفعّل بعد. أضف NEXT_PUBLIC_GOOGLE_CLIENT_ID في إعدادات Vercel ثم أعد النشر (الخطوات في ملف README).",
+      });
+      return;
+    }
     setUpload({ busy: true, msg: "جارٍ تسجيل الدخول إلى Google…" });
     try {
       const token = await getAccessToken();
@@ -783,28 +850,62 @@ function Summary({
       setUpload({ busy: true, msg: `تجهيز المجلد «${name}»…` });
       const folderId = await ensureFolder(token, name);
 
-      // One upload per distinct clip: a group video is shared by many orders.
-      const seen = new Set<string>();
-      const jobs = records.filter((r) => {
+      // One upload per distinct clip: a group session's video is shared by
+      // every order in it, so uploading per record would send it many times.
+      const byClip = new Map<string, PackRecord[]>();
+      for (const r of records) {
+        if (!r.hasVideo) continue;
         const k = videoKeyOf(r);
-        if (!r.hasVideo || seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      });
+        byClip.set(k, [...(byClip.get(k) ?? []), r]);
+      }
+      const clips = [...byClip.entries()];
 
-      for (let i = 0; i < jobs.length; i++) {
-        const r = jobs[i];
-        const o = byId.get(r.orderId);
-        setUpload({ busy: true, msg: `رفع ${i + 1} من ${jobs.length}…` });
-        const blob = await loadVideo(videoKeyOf(r));
+      const nameFor = (rs: PackRecord[]) => {
+        const first = byId.get(rs[0].orderId);
+        const base = `${first?.orderNumber ?? rs[0].orderId} - ${first?.customerName ?? "بلا اسم"}`;
+        // A shared clip cannot be named after one order alone, or the other
+        // orders in it would look as though they were never filmed.
+        return rs.length > 1
+          ? safeFileName(`${base} (+${rs.length - 1} طلب)`)
+          : safeFileName(base);
+      };
+
+      let uploaded = 0;
+      for (let i = 0; i < clips.length; i++) {
+        const [key, rs] = clips[i];
+        setUpload({ busy: true, msg: `رفع ${i + 1} من ${clips.length}…` });
+        const blob = await loadVideo(key);
         if (!blob) continue;
-        const label = r.groupId
-          ? `group-${o?.orderNumber ?? r.orderId}-x${r.groupSize ?? 1}`
-          : `order-${o?.orderNumber ?? r.orderId}`;
-        await uploadFile(token, folderId, `${label}.webm`, blob);
+        await uploadFile(token, folderId, `${nameFor(rs)}.webm`, blob);
+        uploaded++;
       }
 
-      setUpload({ busy: false, msg: `تم رفع ${jobs.length} فيديو إلى «${name}»` });
+      // A manifest so a shared group clip can still be traced to every order.
+      const csv = [
+        "رقم الطلب,العميل,المدينة,المدة,وقت التعبئة,ملف الفيديو",
+        ...records.map((r) => {
+          const o = byId.get(r.orderId);
+          const rs = byClip.get(videoKeyOf(r));
+          const file = r.hasVideo && rs ? `${nameFor(rs)}.webm` : "";
+          const cell = (v: string) => `"${v.replace(/"/g, '""')}"`;
+          return [
+            o?.orderNumber ?? r.orderId,
+            o?.customerName ?? "",
+            o?.city ?? "",
+            formatDuration(r.durationMs),
+            new Date(r.packedAt).toLocaleString("ar-SA"),
+            file,
+          ]
+            .map((v) => cell(String(v)))
+            .join(",");
+        }),
+      ].join("\n");
+      await uploadText(token, folderId, `${safeFileName(name)} - الملخّص.csv`, csv);
+
+      setUpload({
+        busy: false,
+        msg: `تم رفع ${uploaded} فيديو و ملخّص إلى «${name}»`,
+      });
     } catch (e) {
       setUpload({
         busy: false,
@@ -820,11 +921,20 @@ function Summary({
         onClose={onClose}
         footer={
           <>
-            {allDone && driveConfigured() && (
-              <button className="btn b-drive" disabled={upload.busy} onClick={() => void uploadAll()}>
-                {upload.busy ? upload.msg : "رفع إلى ملف Drive"}
-              </button>
-            )}
+            {/* Always offered, not gated on the batch being finished: a long
+                day is often uploaded in stages, and already-packed orders are
+                the ones at risk if the phone fills up or is lost. */}
+            <button
+              className="btn b-drive"
+              disabled={upload.busy || withVideo === 0}
+              onClick={() => void uploadAll()}
+            >
+              {upload.busy
+                ? upload.msg
+                : withVideo === 0
+                  ? "لا فيديوهات للرفع بعد"
+                  : `رفع ${withVideo} فيديو إلى Drive`}
+            </button>
             <div className="b-row">
               <button className="btn b-line" onClick={() => relinkRef.current?.click()}>
                 ربط صور المنتجات
@@ -849,7 +959,7 @@ function Summary({
 
         {!upload.busy && upload.msg && <div className="flash ok">{upload.msg}</div>}
         {relinkMsg && <div className="flash ok">{relinkMsg}</div>}
-        {allDone && !driveConfigured() && (
+        {!driveConfigured() && (
           <p className="note">
             الرفع إلى Drive غير مفعّل — يحتاج ضبط <code>NEXT_PUBLIC_GOOGLE_CLIENT_ID</code>.
           </p>
@@ -956,8 +1066,8 @@ function Setup({ onReady }: { onReady: (b: Batch) => void }) {
     <div className="app">
       <header className="top">
         <div>
-          <div className="count" style={{ fontSize: 20 }}>لملم</div>
-          <div className="lbl">ارفع الملفات لتبدأ</div>
+          <div className="count" style={{ fontSize: 22 }}>لَمّ</div>
+          <div className="lbl">لتجهيز الطلبات — ارفع الملفات لتبدأ</div>
         </div>
       </header>
 
