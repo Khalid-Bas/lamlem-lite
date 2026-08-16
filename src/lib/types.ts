@@ -46,6 +46,8 @@ export interface PackRecord {
   groupId?: string;
   /** Orders that share this order's video, including itself. */
   groupSize?: number;
+  /** True once the packer re-scanned the label to confirm the box. */
+  verified?: boolean;
 }
 
 export interface Batch {

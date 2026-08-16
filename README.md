@@ -33,6 +33,22 @@ Scanning is **only** active while the scanner is on screen. During packing the
 detector is off, so a label lying on the bench cannot end the order or restart
 the recording.
 
+**الإعدادات** (on the main screen) holds three switches: read the order aloud
+when a label scans, ask for a confirming re-scan after each order, and video
+quality (1080p / 720p / 480p — 1080p by default, because the point of the
+recording is being able to read a label back).
+
+After an order is finished, the app asks for a confirming re-scan of the sealed
+box. Scanning the wrong label says which order it actually belongs to and keeps
+waiting; scanning the right one stamps the record with ✓ تحقّق in the summary.
+It can be skipped per-order, or switched off entirely.
+
+The Android back button closes whatever is on top — scanner, preview, sheet —
+innermost first, and only offers to leave the app when nothing is open.
+
+In **الطلبات**, swipe left/right (or use ‹ السابق / التالي ›) to flick through
+every order without closing the preview.
+
 Every scan gives feedback you can feel and hear without looking: a single buzz
 and tick for a good read, a double buzz and low two-tone for an unknown code,
 a rising C–E–G chime when an order is done, and a longer flourish when the last
@@ -63,8 +79,9 @@ video exists — you do not have to finish the batch first. It creates a folder
 named after the carrier and the batch date — `SMSA - 24/08/2026` — and uploads
 one file per recording, named `رقم الطلب - اسم العميل.webm`.
 
-A clip from a group session is shared by several orders, so it is named after
-the first one with a `(+N طلب)` suffix. Alongside the videos it writes a
+A clip from a group session lists **every** order number in its filename
+(`276219057 - 276288899 - 276371802.webm`), trimmed with a count if the session
+was long enough to exceed the 255-character filename limit. Alongside the videos it writes a
 `… - الملخّص.csv` manifest listing every order, its customer, duration and which
 video file it appears in, so a shared clip can still be traced back.
 

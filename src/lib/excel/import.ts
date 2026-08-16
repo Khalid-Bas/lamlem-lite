@@ -183,12 +183,17 @@ export function importCatalog(rows: Row[]): ImportResult {
       for (const g of optionGroups(row)) {
         if (!g.value) continue;
         // The group's display name lives on the parent row, not this one.
-        const parentGroup = parent.variants.length
-          ? parent.variants[0].groupName
-          : (parent as Product & { _groupName?: string })._groupName;
+        // The group's display name lives on the parent row, indexed by the
+        // same [n] slot. Reusing the first group's name for every slot was
+        // wrong for products with two options (milk type AND cup colour):
+        // every value came back labelled with the first group's name.
+        const names = (parent as Product & { _groupNames?: Record<number, string> })
+          ._groupNames;
+        const parentGroup = names?.[g.index];
         const variant: Variant = {
           id: `${parent.id}:v${parent.variants.length + 1}`,
           groupName: parentGroup ?? "الخيار",
+          groupIndex: g.index,
           groupType: g.image ? "image" : "text",
           value: g.value,
           imageUrl: g.image,
@@ -206,7 +211,7 @@ export function importCatalog(rows: Row[]): ImportResult {
     const descriptionHtml = str(pick(row, HEADERS.description));
     const groups = optionGroups(row);
 
-    const product: Product & { _groupName?: string } = {
+    const product: Product & { _groupNames?: Record<number, string> } = {
       id: `p${i + 1}`,
       sallaId: str(pick(row, HEADERS.sallaId)),
       name,
@@ -225,7 +230,10 @@ export function importCatalog(rows: Row[]): ImportResult {
       isBundle: looksLikeBundle(name, categories),
       hasBundleRule: false,
       // Carried so the following خيار rows know their group's display name.
-      _groupName: groups.find((g) => g.name)?.name,
+      // One entry per [n] slot, so each variant can find its own group name.
+      _groupNames: Object.fromEntries(
+        groups.filter((g) => g.name).map((g) => [g.index, g.name as string]),
+      ),
     };
 
     products.push(product);
@@ -233,7 +241,7 @@ export function importCatalog(rows: Row[]): ImportResult {
 
   // Strip the private carrier field before handing products out.
   for (const p of products) {
-    delete (p as Product & { _groupName?: string })._groupName;
+    delete (p as Product & { _groupNames?: Record<number, string> })._groupNames;
   }
 
   const packable = products.filter((p) => p.status !== "hidden");

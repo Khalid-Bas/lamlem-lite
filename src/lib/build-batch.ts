@@ -187,3 +187,18 @@ export async function buildBatch(
     },
   };
 }
+
+/**
+ * Plain sentence describing what goes in the box, for the spoken announcement.
+ *
+ * Quantities are only voiced when greater than one — "واحد" before every item
+ * makes a long list harder to follow, not easier.
+ */
+export function describeOrder(order: PackOrder): string {
+  const parts = order.items.map((it) => {
+    const qty = it.quantity > 1 ? `${it.quantity} ` : "";
+    const opt = it.optionText ? `، ${it.optionText}` : "";
+    return `${qty}${it.name}${opt}`;
+  });
+  return parts.join("، و ");
+}

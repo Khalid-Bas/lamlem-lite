@@ -174,3 +174,19 @@ img{display:block;max-width:100%}
 
 /* Children keep their natural height so the container scrolls them. */
 .scrolly>*{flex:none}
+
+/* ─── settings ─── */
+.toggle{display:flex;align-items:center;gap:12px;width:100%;text-align:start;
+  background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px}
+.toggle:disabled{opacity:.5}
+.toggle .tx{flex:1;min-width:0}
+.toggle .tx b{display:block;font-size:14.5px}
+.toggle .tx span{display:block;font-size:12px;color:var(--ink-3);line-height:1.6;margin-top:2px}
+.toggle .sw{flex:none;width:48px;height:28px;border-radius:999px;background:var(--line);
+  position:relative;transition:.18s}
+.toggle .sw i{position:absolute;top:3px;inset-inline-start:3px;width:22px;height:22px;
+  border-radius:50%;background:var(--ink-3);transition:.18s}
+.toggle.on .sw{background:var(--go)}
+.toggle.on .sw i{inset-inline-start:23px;background:#04140A}
+.blk{display:flex;flex-direction:column;gap:8px}
+.blk-title{font-size:14.5px}

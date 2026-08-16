@@ -5,6 +5,8 @@ export type ProductStatus = "available" | "unavailable" | "hidden";
 export interface Variant {
   id: string;
   groupName: string;
+  /** Which [n] option slot this value belongs to; 1 when unknown. */
+  groupIndex?: number;
   groupType: "image" | "text";
   value: string;
   imageUrl?: string;

@@ -13,7 +13,20 @@
  * makes "scan the next order to finish this one" work without any button.
  */
 
+import { QUALITY, type VideoQuality } from "./settings.ts";
+
 export type BarcodeHandler = (value: string) => void;
+
+/**
+ * Gap between detection attempts.
+ *
+ * Deliberately a timer rather than requestAnimationFrame: rAF is suspended
+ * whenever the page stops compositing (screen dimmed, app backgrounded), which
+ * silently stalls scanning. It also fires ~60 times a second, and running a
+ * detector over a 1080p frame that often is pure battery burn — a label is
+ * still picked up instantly at roughly eight attempts per second.
+ */
+const SCAN_INTERVAL_MS = 120;
 
 /** Formats carriers actually print on Saudi shipping labels. */
 const FORMATS = [
@@ -52,7 +65,7 @@ export class Camera {
   private recorder: MediaRecorder | null = null;
   private chunks: Blob[] = [];
   private detector: BarcodeDetectorLike | null = null;
-  private raf = 0;
+  private timer: ReturnType<typeof setTimeout> | 0 = 0;
   private scanning = false;
   /** Incremented on every stop, to invalidate in-flight detections. */
   private session = 0;
@@ -60,9 +73,19 @@ export class Camera {
   private cooldown = new Map<string, number>();
 
   video: HTMLVideoElement;
+  private quality: VideoQuality;
 
-  constructor(video: HTMLVideoElement) {
+  constructor(video: HTMLVideoElement, quality: VideoQuality = "high") {
     this.video = video;
+    this.quality = quality;
+  }
+
+  /**
+   * Changes capture quality. Takes effect the next time the camera starts, so
+   * a recording already in progress is never disturbed mid-order.
+   */
+  setQuality(q: VideoQuality): void {
+    this.quality = q;
   }
 
   /**
@@ -92,13 +115,17 @@ export class Camera {
       }
       return;
     }
+    const q = QUALITY[this.quality];
     this.stream = await navigator.mediaDevices.getUserMedia({
-      // Rear camera, and a resolution high enough to resolve a Code 128 bar
-      // pattern without producing enormous video files.
+      // Rear camera. Resolution follows the quality setting: the recording has
+      // to be legible enough to read a shipping label back, which 720p was not.
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
+        width: { ideal: q.width },
+        height: { ideal: q.height },
+        // 24fps over 30 leaves more bits per frame for the same bitrate, which
+        // is what makes small print readable.
+        frameRate: { ideal: 24, max: 30 },
       },
       audio: false,
     });
@@ -156,7 +183,7 @@ export class Camera {
         // A dropped frame is not worth surfacing; the next tick retries.
       }
       if (!this.scanning || session !== this.session) return;
-      this.raf = requestAnimationFrame(() => void tick());
+      this.timer = setTimeout(() => void tick(), SCAN_INTERVAL_MS);
     };
     void tick();
   }
@@ -166,8 +193,8 @@ export class Camera {
     // Bumping the session invalidates any in-flight detection, so a promise
     // that resolves after this call cannot deliver a code.
     this.session++;
-    if (this.raf) cancelAnimationFrame(this.raf);
-    this.raf = 0;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = 0;
   }
 
   get isScanning(): boolean {
@@ -196,9 +223,10 @@ export class Camera {
     this.chunks = [];
     this.recorder = new MediaRecorder(this.stream, {
       mimeType: Camera.mimeType(),
-      // ~1.5 Mbps keeps a few minutes of packing well under 20 MB, which
-      // matters because these are stored on the phone.
-      videoBitsPerSecond: 1_500_000,
+      // Bitrate follows the quality setting. The old flat 1.5 Mbps was too low
+      // to read printed text back off a label, which is the main reason these
+      // recordings exist.
+      videoBitsPerSecond: QUALITY[this.quality].bitrate,
     });
     this.recorder.ondataavailable = (e) => {
       if (e.data.size > 0) this.chunks.push(e.data);

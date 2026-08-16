@@ -102,6 +102,46 @@ export function cueGroupDone(): void {
   ]);
 }
 
+/**
+ * Reads text aloud in Arabic.
+ *
+ * Used to announce what an order contains the moment its label scans, so the
+ * packer hears what to put in the box without looking up from the bench.
+ * Anything already queued is cancelled first — a stale announcement talking
+ * over the current order is worse than silence.
+ */
+export function speak(text: string): void {
+  if (typeof window === "undefined") return;
+  const synth = window.speechSynthesis;
+  if (!synth || !text.trim()) return;
+  try {
+    synth.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "ar-SA";
+    // Slightly brisk: these are short phrases heard many times a day.
+    u.rate = 1.05;
+    u.pitch = 1;
+    const arabic = synth.getVoices().find((v) => v.lang?.toLowerCase().startsWith("ar"));
+    if (arabic) u.voice = arabic;
+    synth.speak(u);
+  } catch {
+    // No speech engine on this device: the visual card is still there.
+  }
+}
+
+export function stopSpeaking(): void {
+  try {
+    window.speechSynthesis?.cancel();
+  } catch {
+    /* nothing to cancel */
+  }
+}
+
+/** True when the device can speak at all. */
+export function canSpeak(): boolean {
+  return typeof window !== "undefined" && Boolean(window.speechSynthesis);
+}
+
 /** Every order in the batch is packed: longer, unmistakable flourish. */
 export function cueBatchDone(): void {
   navigator.vibrate?.([80, 60, 80, 60, 200]);

@@ -55,3 +55,42 @@ test("falls back to the raw text when the product has no variants", () => {
 test("returns nothing for empty input", () => {
   assert.equal(resolveOption(undefined, milk), undefined);
 });
+
+/* ── multi-group products (e.g. milk type AND cup colour) ── */
+
+const twoGroup = (): Product => ({
+  id: "p2", name: "بكج الجمعات", categories: [], imageUrls: [], status: "available",
+  isBundle: true, hasBundleRule: false,
+  variants: [
+    { id: "a1", groupName: "نوع الحليب", groupIndex: 1, groupType: "image", value: "مشروب اوتسايد" },
+    { id: "a2", groupName: "نوع الحليب", groupIndex: 1, groupType: "image", value: "مشروب اوتلي" },
+    { id: "b1", groupName: "لون الكوب", groupIndex: 2, groupType: "image", value: "ابيض" },
+    { id: "b2", groupName: "لون الكوب", groupIndex: 2, groupType: "image", value: "اسود" },
+  ],
+});
+
+test("resolves two option groups printed on separate lines", () => {
+  const r = resolveOption("نوع الحليب م � وب اوت � · لون الكوب ا � ود", twoGroup());
+  assert.equal(r?.text, "نوع الحليب: مشروب اوتلي · لون الكوب: اسود");
+  assert.equal(r?.repaired, true);
+});
+
+test("labels each value with its own group, not the first group's name", () => {
+  // Regression: every variant used to inherit group [1]'s name, so the cup
+  // colour was announced as "نوع الحليب".
+  const r = resolveOption("نوع الحليب مشروب اوتلي · لون الكوب ابيض", twoGroup());
+  assert.ok(r?.text.includes("لون الكوب: ابيض"), `got ${r?.text}`);
+  assert.ok(r?.text.includes("نوع الحليب: مشروب اوتلي"), `got ${r?.text}`);
+});
+
+test("resolves two groups even when printed on one line", () => {
+  const r = resolveOption("نوع الحليب م�وب اوتلي لون الكوب ابيض", twoGroup());
+  assert.equal(r?.text, "نوع الحليب: مشروب اوتلي · لون الكوب: ابيض");
+  assert.equal(r?.repaired, true);
+});
+
+test("a group is never used twice across fragments", () => {
+  const r = resolveOption("نوع الحليب مشروب اوتلي · نوع الحليب مشروب اوتسايد", twoGroup());
+  const milkCount = (r!.text.match(/نوع الحليب:/g) ?? []).length;
+  assert.equal(milkCount, 1, `each group appears once, got: ${r?.text}`);
+});

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Camera, canScan } from "@/lib/camera";
-import { buildBatch, linkCatalog, type BuildProgress, type BuildStats } from "@/lib/build-batch";
+import { buildBatch, linkCatalog, describeOrder, type BuildProgress, type BuildStats } from "@/lib/build-batch";
 import { readCatalog } from "@/lib/catalog-load";
 import {
   clearAll, formatBytes, formatDuration, loadBatch, loadVideo,
@@ -12,12 +12,14 @@ import { buildAliases, resolveScan } from "@/lib/barcode";
 import { driveConfigured, ensureFolder, folderName, getAccessToken, uploadFile, uploadText, safeFileName } from "@/lib/drive";
 import {
   primeAudio, cueScanOk, cueScanFail, cueNeutral,
-  cueOrderDone, cueGroupDone, cueBatchDone,
+  cueOrderDone, cueGroupDone, cueBatchDone, speak, stopSpeaking, canSpeak,
 } from "@/lib/feedback";
+import { loadSettings, saveSettings, QUALITY, DEFAULTS, type Settings as Prefs } from "@/lib/settings";
+import { useBackGuard } from "@/lib/use-back-guard";
 import type { Batch, PackOrder, PackRecord } from "@/lib/types";
 
 type Mode = "setup" | "idle" | "packing" | "group-collect" | "group-recording" | "group-verify";
-type ScanPurpose = "single" | "group-collect" | "group-verify";
+type ScanPurpose = "single" | "group-collect" | "group-verify" | "verify-one";
 type Flash = { kind: "bad" | "warn" | "ok"; text: string } | null;
 
 export default function App() {
@@ -30,7 +32,10 @@ export default function App() {
   const [flash, setFlash] = useState<Flash>(null);
   const [camError, setCamError] = useState("");
   const [scanFor, setScanFor] = useState<ScanPurpose | null>(null);
-  const [sheet, setSheet] = useState<"orders" | "summary" | null>(null);
+  const [sheet, setSheet] = useState<"orders" | "summary" | "settings" | null>(null);
+  const [prefs, setPrefs] = useState<Prefs>(DEFAULTS);
+  /** Order awaiting a confirming re-scan after being packed. */
+  const [verifyOne, setVerifyOne] = useState<PackOrder | null>(null);
   /** Order being previewed from the list. Viewing never starts a recording. */
   const [preview, setPreview] = useState<PackOrder | null>(null);
   /** Bumped once the camera exists, so the scanning effect can re-run. */
@@ -45,9 +50,17 @@ export default function App() {
   /** Adds/ticks an order without scanning, for when a label will not read. */
   const addManually = useCallback((id: string) => {
     if (modeRef.current === "group-collect") {
-      setGroupIds((ids) => (ids.includes(id) ? ids : [...ids, id]));
+      setGroupIds((ids) => {
+        if (ids.includes(id)) { cueNeutral(); return ids; }
+        cueScanOk();
+        return [...ids, id];
+      });
     } else if (modeRef.current === "group-verify") {
-      setVerified((v) => (v.includes(id) ? v : [...v, id]));
+      setVerified((v) => {
+        if (v.includes(id)) { cueNeutral(); return v; }
+        cueScanOk();
+        return [...v, id];
+      });
     }
   }, []);
 
@@ -67,8 +80,29 @@ export default function App() {
   groupIdsRef.current = groupIds;
 
   useEffect(() => {
+    setPrefs(loadSettings());
     void loadBatch().then((b) => {
       if (b) { setBatch(b); setMode("idle"); }
+    });
+  }, []);
+
+  const prefsRef = useRef<Prefs>(DEFAULTS);
+  prefsRef.current = prefs;
+  const scanForRef = useRef<ScanPurpose | null>(null);
+  const verifyOneRef = useRef<PackOrder | null>(null);
+  const previewRef = useRef<PackOrder | null>(null);
+  const sheetRef = useRef<"orders" | "summary" | "settings" | null>(null);
+  scanForRef.current = scanFor;
+  verifyOneRef.current = verifyOne;
+  previewRef.current = preview;
+  sheetRef.current = sheet;
+
+  const updatePrefs = useCallback((patch: Partial<Prefs>) => {
+    setPrefs((p) => {
+      const next = { ...p, ...patch };
+      saveSettings(next);
+      if (patch.videoQuality) camRef.current?.setQuality(patch.videoQuality);
+      return next;
     });
   }, []);
 
@@ -93,7 +127,7 @@ export default function App() {
   /* ── camera: opened on demand, kept alive while a recording is running ── */
   const ensureCamera = useCallback(async (): Promise<Camera | null> => {
     if (!videoRef.current) return null;
-    const cam = camRef.current ?? new Camera(videoRef.current);
+    const cam = camRef.current ?? new Camera(videoRef.current, prefsRef.current.videoQuality);
     camRef.current = cam;
     // Re-bind in case React handed us a different element since last time.
     cam.attach(videoRef.current);
@@ -209,6 +243,33 @@ export default function App() {
         return;
       }
 
+      if (scanForRef.current === "verify-one") {
+        const target = verifyOneRef.current;
+        if (!target || order.id !== target.id) {
+          setFlash({ kind: "bad", text: `هذا #${order.orderNumber} — المطلوب #${target?.orderNumber}` });
+          cueScanFail();
+          return;
+        }
+        // Stamp the record so an unverified box is visible in the summary.
+        const base = batchRef.current;
+        if (base) {
+          const next = {
+            ...base,
+            records: base.records.map((r) =>
+              r.orderId === order.id ? { ...r, verified: true } : r,
+            ),
+          };
+          batchRef.current = next;
+          setBatch(next);
+          void saveBatch(next);
+        }
+        cueScanOk();
+        setVerifyOne(null);
+        setScanFor(null);
+        setFlash({ kind: "ok", text: `تم التحقق من #${order.orderNumber}` });
+        return;
+      }
+
       // Single-order flow. Detection must stop the moment a label resolves —
       // otherwise it keeps running behind the packing screen and the next
       // barcode in view would end the order on its own.
@@ -220,12 +281,16 @@ export default function App() {
         await finishCurrent();
         setScanFor(null);
         setMode("idle");
+        modeRef.current = "idle";
+        await askVerifyRef.current(order);
         return;
       }
       if (active) await finishCurrent();
       cueScanOk();
       setScanFor(null);
       beginOrder(order);
+      // Announce what goes in the box, so the packer need not look up.
+      if (prefsRef.current.voice) speak(describeOrder(order));
     },
     [beginOrder, finishCurrent],
   );
@@ -271,10 +336,47 @@ export default function App() {
    * the camera — several hundred milliseconds on a phone, during which the
    * preview is black. The stream is released on reset and on unmount instead.
    */
+  const openScannerRef = useRef(openScanner);
+  openScannerRef.current = openScanner;
+
   const closeScanner = useCallback(() => {
     camRef.current?.stopScanning();
     setScanFor(null);
+    setVerifyOne(null);
   }, []);
+
+  /**
+   * Asks for a confirming re-scan of the order just packed.
+   *
+   * The point is catching a box that was filled from the wrong order: the
+   * label on the sealed box is scanned again and must match what was packed.
+   */
+  const askVerify = useCallback(
+    async (order: PackOrder) => {
+      if (!prefsRef.current.verifyAfterPack) return false;
+      setVerifyOne(order);
+      verifyOneRef.current = order;
+      await openScannerRef.current("verify-one");
+      return true;
+    },
+    [],
+  );
+  const askVerifyRef = useRef(askVerify);
+  askVerifyRef.current = askVerify;
+
+  /**
+   * Android's back button closes whatever is on top, innermost first, instead
+   * of leaving the site. Only when nothing is open does it offer to exit.
+   */
+  useBackGuard(
+    () => {
+      if (scanForRef.current) { closeScanner(); return true; }
+      if (previewRef.current) { setPreview(null); return true; }
+      if (sheetRef.current) { setSheet(null); return true; }
+      return false;
+    },
+    () => confirm("هل أنت متأكد من أنك تريد الخروج من الصفحة؟"),
+  );
 
   /* ── group session ── */
   const startGroup = useCallback(async () => {
@@ -427,6 +529,9 @@ export default function App() {
                 عرض الملخّص والفيديوهات ({done})
               </button>
             )}
+            <button className="btn b-ghost" onClick={() => setSheet("settings")}>
+              الإعدادات
+            </button>
           </>
         )}
 
@@ -435,7 +540,15 @@ export default function App() {
             <OrderCard order={current} />
             <button
               className="btn b-go"
-              onClick={() => void finishCurrent().then(() => setMode("idle"))}
+              onClick={() =>
+                void (async () => {
+                  const packed = currentRef.current;
+                  await finishCurrent();
+                  setMode("idle");
+                  modeRef.current = "idle";
+                  if (packed) await askVerify(packed);
+                })()
+              }
             >
               تم — أنهِ هذا الطلب
             </button>
@@ -479,7 +592,9 @@ export default function App() {
               ? `اختيار المجموعة — ${groupIds.length} طلب`
               : scanFor === "group-verify"
                 ? `تحقق — ${verified.length} / ${groupIds.length}`
-                : "وجّه الكاميرا نحو الباركود"
+                : scanFor === "verify-one"
+                  ? `تحقق — امسح بوليصة #${verifyOne?.orderNumber} مرة أخرى`
+                  : "وجّه الكاميرا نحو الباركود"
           }
           flash={flash}
           onClose={() => {
@@ -510,6 +625,15 @@ export default function App() {
                   onClick={() => void beginGroupRecording()}
                 >
                   ابدأ التسجيل ({groupIds.length})
+                </button>
+              </>
+            ) : scanFor === "verify-one" ? (
+              <>
+                <p className="note">
+                  امسح بوليصة الصندوق المغلق للتأكد أنه الطلب الصحيح.
+                </p>
+                <button className="btn b-ghost" onClick={closeScanner}>
+                  تخطَّ التحقق
                 </button>
               </>
             ) : scanFor === "group-verify" ? (
@@ -581,6 +705,13 @@ export default function App() {
       {preview && (
         <OrderPreview
           order={preview}
+          index={orders.findIndex((o) => o.id === preview.id)}
+          count={orders.length}
+          onStep={(d) => {
+            const i = orders.findIndex((o) => o.id === preview.id);
+            const next = orders[i + d];
+            if (next) setPreview(next);
+          }}
           packed={packedIds.has(preview.id)}
           record={batch?.records.find((r) => r.orderId === preview.id)}
           busyWith={current}
@@ -595,6 +726,14 @@ export default function App() {
               beginOrder(o);
             })();
           }}
+        />
+      )}
+
+      {sheet === "settings" && (
+        <SettingsSheet
+          prefs={prefs}
+          onChange={updatePrefs}
+          onClose={() => setSheet(null)}
         />
       )}
 
@@ -786,15 +925,37 @@ function OrderCard({ order, compact }: { order: PackOrder; compact?: boolean }) 
  * packed the button says so, because starting a new one closes that recording.
  */
 function OrderPreview({
-  order, packed, record, busyWith, onClose, onStart,
+  order, index, count, onStep, packed, record, busyWith, onClose, onStart,
 }: {
   order: PackOrder;
+  index: number;
+  count: number;
+  onStep: (delta: number) => void;
   packed: boolean;
   record?: PackRecord;
   busyWith: PackOrder | null;
   onClose: () => void;
   onStart: () => void;
 }) {
+  // Horizontal swipe moves between orders, so a whole batch can be flicked
+  // through without closing and reopening the list each time.
+  const touch = useRef<{ x: number; y: number } | null>(null);
+  const onTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    touch.current = { x: t.clientX, y: t.clientY };
+  };
+  const onTouchEnd = (e: React.TouchEvent) => {
+    const start = touch.current;
+    touch.current = null;
+    if (!start) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    // Ignore mostly-vertical gestures so scrolling the card still works.
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    // RTL: swiping right (positive dx) moves to the next order in the list.
+    onStep(dx > 0 ? 1 : -1);
+  };
   const interrupting = Boolean(busyWith && busyWith.id !== order.id);
 
   const label = packed
@@ -814,10 +975,30 @@ function OrderPreview({
 
   return (
     <Sheet
-      title={`معاينة #${order.orderNumber}`}
+      title={`معاينة — ${index + 1} من ${count}`}
       onClose={onClose}
+      onTouchStart={onTouchStart}
+      onTouchEnd={onTouchEnd}
       footer={
         <>
+          <div className="b-row">
+            <button
+              className="btn b-line"
+              disabled={index <= 0}
+              onClick={() => onStep(-1)}
+              aria-label="الطلب السابق"
+            >
+              ‹ السابق
+            </button>
+            <button
+              className="btn b-line"
+              disabled={index >= count - 1}
+              onClick={() => onStep(1)}
+              aria-label="الطلب التالي"
+            >
+              التالي ›
+            </button>
+          </div>
           <button className="btn b-go" onClick={start}>
             <RecIcon />
             {label}
@@ -852,16 +1033,23 @@ function RecIcon() {
 /* ══════════════ sheet shell (scrollable) ══════════════ */
 
 function Sheet({
-  title, children, footer, onClose,
+  title, children, footer, onClose, onTouchStart, onTouchEnd,
 }: {
   title: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
   onClose: () => void;
+  onTouchStart?: (e: React.TouchEvent) => void;
+  onTouchEnd?: (e: React.TouchEvent) => void;
 }) {
   return (
     <div className="sheet" onClick={onClose}>
-      <div className="inner" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="inner"
+        onClick={(e) => e.stopPropagation()}
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
+      >
         <div className="grab" />
         <h3 className="sheet-title">{title}</h3>
         {/* min-height:0 on this region is what actually lets it scroll inside
@@ -956,13 +1144,28 @@ function Summary({
       const clips = [...byClip.entries()];
 
       const nameFor = (rs: PackRecord[]) => {
-        const first = byId.get(rs[0].orderId);
-        const base = `${first?.orderNumber ?? rs[0].orderId} - ${first?.customerName ?? "بلا اسم"}`;
-        // A shared clip cannot be named after one order alone, or the other
-        // orders in it would look as though they were never filmed.
-        return rs.length > 1
-          ? safeFileName(`${base} (+${rs.length - 1} طلب)`)
-          : safeFileName(base);
+        if (rs.length === 1) {
+          const o = byId.get(rs[0].orderId);
+          return safeFileName(`${o?.orderNumber ?? rs[0].orderId} - ${o?.customerName ?? "بلا اسم"}`);
+        }
+        // A shared clip is named after every order in it, so any one of them
+        // can be found by searching Drive for its number.
+        const numbers = rs.map((r) => byId.get(r.orderId)?.orderNumber ?? r.orderId);
+        const joined = numbers.join(" - ");
+        // Most filesystems stop at 255 characters, so a 22-order session gets
+        // trimmed with a count rather than silently failing to save.
+        const LIMIT = 180;
+        if (joined.length <= LIMIT) return safeFileName(joined);
+        const kept: string[] = [];
+        let len = 0;
+        for (const n of numbers) {
+          if (len + n.length + 3 > LIMIT) break;
+          kept.push(n);
+          len += n.length + 3;
+        }
+        return safeFileName(
+          `${kept.join(" - ")} + ${numbers.length - kept.length} طلب آخر`,
+        );
       };
 
       let uploaded = 0;
@@ -1090,6 +1293,7 @@ function Summary({
                     {r.groupId ? ` · ضمن مجموعة ${r.groupSize}` : ""}
                   </span>
                 </span>
+                {r.verified && <span className="chip done">✓ تحقّق</span>}
                 <span className="dur">{formatDuration(r.durationMs)}</span>
                 {r.hasVideo && (
                   <span className="acts">
@@ -1270,5 +1474,88 @@ function ScanIcon() {
       <path d="M3 6.5V4.5A1.5 1.5 0 014.5 3h2M17 6.5V4.5A1.5 1.5 0 0015.5 3h-2M3 13.5v2A1.5 1.5 0 004.5 17h2M17 13.5v2a1.5 1.5 0 01-1.5 1.5h-2" />
       <path d="M6.5 7v6M9 7v6M11.5 7v6M14 7v6" />
     </svg>
+  );
+}
+
+/* ══════════════ settings ══════════════ */
+
+function Toggle({
+  label, note, on, onToggle, disabled, disabledNote,
+}: {
+  label: string;
+  note: string;
+  on: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+  disabledNote?: string;
+}) {
+  return (
+    <button
+      className={`toggle ${on && !disabled ? "on" : ""}`}
+      onClick={onToggle}
+      disabled={disabled}
+      aria-pressed={on && !disabled}
+    >
+      <span className="tx">
+        <b>{label}</b>
+        <span>{disabled ? (disabledNote ?? note) : note}</span>
+      </span>
+      <span className="sw" aria-hidden="true"><i /></span>
+    </button>
+  );
+}
+
+function SettingsSheet({
+  prefs, onChange, onClose,
+}: {
+  prefs: Prefs;
+  onChange: (p: Partial<Prefs>) => void;
+  onClose: () => void;
+}) {
+  const speech = canSpeak();
+  return (
+    <Sheet title="الإعدادات" onClose={onClose}>
+      <Toggle
+        label="نطق محتويات الطلب"
+        note="يقرأ الأصناف بصوت عند مسح الباركود، لتتجنّب الخطأ بلا نظر للشاشة."
+        on={prefs.voice}
+        disabled={!speech}
+        disabledNote="هذا الجهاز لا يدعم النطق."
+        onToggle={() => {
+          const next = !prefs.voice;
+          onChange({ voice: next });
+          if (next) speak("تم تشغيل النطق");
+          else stopSpeaking();
+        }}
+      />
+      <Toggle
+        label="تحقق بعد كل طلب"
+        note="بعد إنهاء الطلب، يطلب مسح البوليصة مرة أخرى للتأكد من الصندوق."
+        on={prefs.verifyAfterPack}
+        onToggle={() => onChange({ verifyAfterPack: !prefs.verifyAfterPack })}
+      />
+
+      <div className="blk">
+        <b className="blk-title">جودة الفيديو</b>
+        <div className="list">
+          {(["high", "medium", "low"] as const).map((q) => (
+            <button
+              key={q}
+              className="lrow"
+              onClick={() => onChange({ videoQuality: q })}
+            >
+              <span className="t">
+                <b style={{ direction: "rtl", textAlign: "start" }}>{QUALITY[q].label}</b>
+                <span>{QUALITY[q].note}</span>
+              </span>
+              {prefs.videoQuality === q && <span className="chip done">مُختار</span>}
+            </button>
+          ))}
+        </div>
+        <p className="note">
+          تُطبَّق الجودة على التسجيل التالي — لن يتأثر تسجيل جارٍ الآن.
+        </p>
+      </div>
+    </Sheet>
   );
 }
