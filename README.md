@@ -35,8 +35,11 @@ the recording.
 
 **الإعدادات** (on the main screen) holds three switches: read the order aloud
 when a label scans, ask for a confirming re-scan after each order, and video
-quality (1080p / 720p / 480p — 1080p by default, because the point of the
-recording is being able to read a label back).
+quality. All presets keep enough resolution to read a label back; the default
+**متوازنة** is full 1080p at 15fps and 2.5 Mbps (~19 MB/min), about half the
+size of the **أعلى وضوح** preset. Frame rate is the lever that matters: at a
+fixed bitrate, fewer frames means more bits per frame, so 15fps actually holds
+*more* per-frame detail than 24fps would at the same size.
 
 After an order is finished, the app asks for a confirming re-scan of the sealed
 box. Scanning the wrong label says which order it actually belongs to and keeps
@@ -79,9 +82,12 @@ video exists — you do not have to finish the batch first. It creates a folder
 named after the carrier and the batch date — `SMSA - 24/08/2026` — and uploads
 one file per recording, named `رقم الطلب - اسم العميل.webm`.
 
-A clip from a group session lists **every** order number in its filename
-(`276219057 - 276288899 - 276371802.webm`), trimmed with a count if the session
-was long enough to exceed the 255-character filename limit. Alongside the videos it writes a
+A group session produces **one** clip covering all its orders, so the summary
+lists it as a single row and offers a single **حفظ** — there is no need to
+download the same file once per order. Its filename lists every order number
+(`276288899 - 276371802 - 276451900 - 276484102.webm`), trimmed with a count if
+a session is long enough to exceed the 255-character filename limit. The same
+name is used whether you save to the phone or upload. Alongside the videos it writes a
 `… - الملخّص.csv` manifest listing every order, its customer, duration and which
 video file it appears in, so a shared clip can still be traced back.
 

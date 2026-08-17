@@ -189,6 +189,36 @@ export function folderName(carrier: string | undefined, when: Date): string {
  * Windows and macOS where `\ / : * ? " < > |` are illegal — a name containing
  * one can fail to save with no useful error.
  */
+/**
+ * Names a clip after every order it contains: "278290423 - 278307194 - …".
+ *
+ * One recording can cover a whole group session, and the packer needs to find
+ * it later by any of its order numbers — so all of them go in the name rather
+ * than just the first. Long sessions are trimmed with a count, because most
+ * filesystems refuse names beyond 255 characters.
+ */
+export function clipFileName(orderNumbers: string[], limit = 180): string {
+  if (orderNumbers.length === 0) return "unnamed";
+  const joined = orderNumbers.join(" - ");
+  if (joined.length <= limit) return safeFileName(joined, limit);
+
+  // Reserve room for the "+ N طلب" tail before filling, or the tail itself
+  // gets truncated away and the name silently claims to list every order.
+  const tailFor = (n: number) => ` + ${n} طلب`;
+  const budget = limit - tailFor(orderNumbers.length).length;
+
+  const kept: string[] = [];
+  let len = 0;
+  for (const n of orderNumbers) {
+    const add = kept.length === 0 ? n.length : n.length + 3;
+    if (len + add > budget) break;
+    kept.push(n);
+    len += add;
+  }
+  const rest = orderNumbers.length - kept.length;
+  return safeFileName(`${kept.join(" - ")}${tailFor(rest)}`, limit);
+}
+
 export function safeFileName(s: string, max = 120): string {
   const cleaned = s
     .replace(/[\\/:*?"<>|]/g, "-")

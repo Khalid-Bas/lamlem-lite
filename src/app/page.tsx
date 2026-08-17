@@ -9,7 +9,7 @@ import {
   saveBatch, saveVideo, upsertRecord, usage,
 } from "@/lib/store";
 import { buildAliases, resolveScan } from "@/lib/barcode";
-import { driveConfigured, ensureFolder, folderName, getAccessToken, uploadFile, uploadText, safeFileName } from "@/lib/drive";
+import { driveConfigured, ensureFolder, folderName, getAccessToken, uploadFile, uploadText, safeFileName, clipFileName } from "@/lib/drive";
 import {
   primeAudio, cueScanOk, cueScanFail, cueNeutral,
   cueOrderDone, cueGroupDone, cueBatchDone, speak, stopSpeaking, canSpeak,
@@ -433,7 +433,9 @@ export default function App() {
           durationMs: Math.round(per),
           packedAt: new Date().toISOString(),
           hasVideo: bytes > 0,
-          videoBytes: bytes > 0 ? Math.round(bytes / ids.length) : undefined,
+          // The whole clip belongs to each of these orders; storing a
+          // share of it made the summary understate the file size.
+          videoBytes: bytes > 0 ? bytes : undefined,
           videoKey: bytes > 0 ? groupIdRef.current : undefined,
           groupId: groupIdRef.current,
           groupSize: ids.length,
@@ -1093,24 +1095,45 @@ function Summary({
 
   const videoKeyOf = (r: PackRecord) => r.videoKey ?? r.orderId;
 
-  // Distinct clips, not records: a group session's orders share one file.
-  const withVideo = new Set(
-    records.filter((r) => r.hasVideo).map((r) => videoKeyOf(r)),
-  ).size;
-
-  async function watch(r: PackRecord, label: string) {
-    const blob = await loadVideo(videoKeyOf(r));
-    if (!blob) return;
-    setPreview({ url: URL.createObjectURL(blob), label });
+  /**
+   * Records grouped by the file they live in.
+   *
+   * A group session writes one clip shared by every order in it, so the
+   * summary lists it once. Listing it per order meant the same video appeared
+   * four times and had to be downloaded four times to be sure of having it.
+   */
+  const clips: { key: string; records: PackRecord[] }[] = [];
+  const clipIndex = new Map<string, number>();
+  for (const r of records) {
+    const key = videoKeyOf(r);
+    const at = clipIndex.get(key);
+    if (at === undefined) {
+      clipIndex.set(key, clips.length);
+      clips.push({ key, records: [r] });
+    } else {
+      clips[at].records.push(r);
+    }
   }
 
-  async function download(r: PackRecord, orderNumber: string) {
-    const blob = await loadVideo(videoKeyOf(r));
+  const withVideo = clips.filter((c) => c.records[0].hasVideo).length;
+
+  /** `278290423 - 278307194 - … .webm`, every order the clip covers. */
+  const clipName = (rs: PackRecord[]) =>
+    clipFileName(rs.map((r) => byId.get(r.orderId)?.orderNumber ?? r.orderId));
+
+  async function watch(rs: PackRecord[]) {
+    const blob = await loadVideo(videoKeyOf(rs[0]));
+    if (!blob) return;
+    setPreview({ url: URL.createObjectURL(blob), label: clipName(rs) });
+  }
+
+  async function download(rs: PackRecord[]) {
+    const blob = await loadVideo(videoKeyOf(rs[0]));
     if (!blob) return;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `order-${orderNumber}.webm`;
+    a.download = `${clipName(rs)}.webm`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
   }
@@ -1133,70 +1156,39 @@ function Summary({
       setUpload({ busy: true, msg: `تجهيز المجلد «${name}»…` });
       const folderId = await ensureFolder(token, name);
 
-      // One upload per distinct clip: a group session's video is shared by
-      // every order in it, so uploading per record would send it many times.
-      const byClip = new Map<string, PackRecord[]>();
-      for (const r of records) {
-        if (!r.hasVideo) continue;
-        const k = videoKeyOf(r);
-        byClip.set(k, [...(byClip.get(k) ?? []), r]);
-      }
-      const clips = [...byClip.entries()];
-
-      const nameFor = (rs: PackRecord[]) => {
-        if (rs.length === 1) {
-          const o = byId.get(rs[0].orderId);
-          return safeFileName(`${o?.orderNumber ?? rs[0].orderId} - ${o?.customerName ?? "بلا اسم"}`);
-        }
-        // A shared clip is named after every order in it, so any one of them
-        // can be found by searching Drive for its number.
-        const numbers = rs.map((r) => byId.get(r.orderId)?.orderNumber ?? r.orderId);
-        const joined = numbers.join(" - ");
-        // Most filesystems stop at 255 characters, so a 22-order session gets
-        // trimmed with a count rather than silently failing to save.
-        const LIMIT = 180;
-        if (joined.length <= LIMIT) return safeFileName(joined);
-        const kept: string[] = [];
-        let len = 0;
-        for (const n of numbers) {
-          if (len + n.length + 3 > LIMIT) break;
-          kept.push(n);
-          len += n.length + 3;
-        }
-        return safeFileName(
-          `${kept.join(" - ")} + ${numbers.length - kept.length} طلب آخر`,
-        );
-      };
+      // One upload per clip, named the same way the summary names it, so a
+      // file downloaded to the phone and the one in Drive match.
+      const jobs = clips.filter((c) => c.records[0].hasVideo);
 
       let uploaded = 0;
-      for (let i = 0; i < clips.length; i++) {
-        const [key, rs] = clips[i];
-        setUpload({ busy: true, msg: `رفع ${i + 1} من ${clips.length}…` });
-        const blob = await loadVideo(key);
+      for (let i = 0; i < jobs.length; i++) {
+        setUpload({ busy: true, msg: `رفع ${i + 1} من ${jobs.length}…` });
+        const blob = await loadVideo(jobs[i].key);
         if (!blob) continue;
-        await uploadFile(token, folderId, `${nameFor(rs)}.webm`, blob);
+        await uploadFile(token, folderId, `${clipName(jobs[i].records)}.webm`, blob);
         uploaded++;
       }
 
-      // A manifest so a shared group clip can still be traced to every order.
+      // A manifest so a shared clip can still be traced back to every order.
       const csv = [
         "رقم الطلب,العميل,المدينة,المدة,وقت التعبئة,ملف الفيديو",
-        ...records.map((r) => {
-          const o = byId.get(r.orderId);
-          const rs = byClip.get(videoKeyOf(r));
-          const file = r.hasVideo && rs ? `${nameFor(rs)}.webm` : "";
-          const cell = (v: string) => `"${v.replace(/"/g, '""')}"`;
-          return [
-            o?.orderNumber ?? r.orderId,
-            o?.customerName ?? "",
-            o?.city ?? "",
-            formatDuration(r.durationMs),
-            new Date(r.packedAt).toLocaleString("ar-SA"),
-            file,
-          ]
-            .map((v) => cell(String(v)))
-            .join(",");
-        }),
+        ...clips.flatMap((c) =>
+          c.records.map((r) => {
+            const o = byId.get(r.orderId);
+            const file = r.hasVideo ? `${clipName(c.records)}.webm` : "";
+            const cell = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+            return [
+              o?.orderNumber ?? r.orderId,
+              o?.customerName ?? "",
+              o?.city ?? "",
+              formatDuration(r.durationMs),
+              new Date(r.packedAt).toLocaleString("ar-SA"),
+              file,
+            ]
+              .map((v) => cell(String(v)))
+              .join(",");
+          }),
+        ),
       ].join("\n");
       await uploadText(token, folderId, `${safeFileName(name)} - الملخّص.csv`, csv);
 
@@ -1276,31 +1268,38 @@ function Summary({
         />
 
         <div className="list">
-          {records.map((r, i) => {
-            const o = byId.get(r.orderId);
+          {/* One row per clip. A group session's orders share a single file,
+              so it is offered once — downloading it four times to be sure of
+              having it was both confusing and a waste of phone storage. */}
+          {clips.map((clip, i) => {
+            const rs = clip.records;
+            const first = rs[0];
+            const orders = rs.map((r) => byId.get(r.orderId));
+            const numbers = orders.map((o, j) => o?.orderNumber ?? rs[j].orderId);
+            const totalDur = rs.reduce((sum, r) => sum + r.durationMs, 0);
+            const bytes = first.videoBytes;
             return (
-              <div className="lrow" key={r.orderId}>
+              <div className="lrow" key={clip.key}>
                 <span className="n">{i + 1}</span>
                 <span className="t">
-                  <b>#{o?.orderNumber ?? r.orderId}</b>
+                  <b>{numbers.map((n) => `#${n}`).join(" · ")}</b>
                   <span>
-                    {o?.customerName ?? "—"}
-                    {o?.city ? ` · ${o.city}` : ""}
+                    {orders.map((o) => o?.customerName ?? "—").join("، ")}
                   </span>
                   <span>
-                    {new Date(r.packedAt).toLocaleTimeString("ar-SA")}
-                    {r.videoBytes ? ` · ${formatBytes(r.videoBytes)}` : " · بلا فيديو"}
-                    {r.groupId ? ` · ضمن مجموعة ${r.groupSize}` : ""}
+                    {new Date(first.packedAt).toLocaleTimeString("ar-SA")}
+                    {bytes ? ` · ${formatBytes(bytes)}` : " · بلا فيديو"}
+                    {rs.length > 1 ? ` · مجموعة من ${rs.length} طلبات` : ""}
                   </span>
                 </span>
-                {r.verified && <span className="chip done">✓ تحقّق</span>}
-                <span className="dur">{formatDuration(r.durationMs)}</span>
-                {r.hasVideo && (
+                {rs.every((r) => r.verified) && <span className="chip done">✓ تحقّق</span>}
+                <span className="dur">{formatDuration(totalDur)}</span>
+                {first.hasVideo && (
                   <span className="acts">
-                    <button className="chip" onClick={() => void watch(r, `#${o?.orderNumber ?? ""}`)}>
+                    <button className="chip" onClick={() => void watch(rs)}>
                       مشاهدة
                     </button>
-                    <button className="chip" onClick={() => void download(r, o?.orderNumber ?? "")}>
+                    <button className="chip" onClick={() => void download(rs)}>
                       حفظ
                     </button>
                   </span>
@@ -1538,7 +1537,7 @@ function SettingsSheet({
       <div className="blk">
         <b className="blk-title">جودة الفيديو</b>
         <div className="list">
-          {(["high", "medium", "low"] as const).map((q) => (
+          {(["high", "balanced", "saver"] as const).map((q) => (
             <button
               key={q}
               className="lrow"

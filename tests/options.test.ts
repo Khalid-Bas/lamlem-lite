@@ -94,3 +94,31 @@ test("a group is never used twice across fragments", () => {
   const milkCount = (r!.text.match(/نوع الحليب:/g) ?? []).length;
   assert.equal(milkCount, 1, `each group appears once, got: ${r?.text}`);
 });
+
+/* ── clip file naming ── */
+import { clipFileName } from "../src/lib/drive.ts";
+
+test("names a single-order clip after that order", () => {
+  assert.equal(clipFileName(["278290423"]), "278290423");
+});
+
+test("names a group clip after every order in it", () => {
+  assert.equal(
+    clipFileName(["278290423", "278307194", "278316405", "278324542"]),
+    "278290423 - 278307194 - 278316405 - 278324542",
+  );
+});
+
+test("trims an over-long name with a count instead of failing to save", () => {
+  // 30 nine-digit numbers would be ~360 characters; most filesystems stop at 255.
+  const many = Array.from({ length: 30 }, (_, i) => `2782904${String(i).padStart(2, "0")}`);
+  const name = clipFileName(many);
+  assert.ok(name.length <= 180, `got ${name.length} chars`);
+  assert.ok(name.includes("طلب"), "says how many were left out");
+  assert.ok(name.startsWith("278290400"), "keeps the first orders");
+});
+
+test("strips characters that are illegal in a filename", () => {
+  assert.ok(!clipFileName(["27829/0423", "278307:194"]).includes("/"));
+  assert.ok(!clipFileName(["27829/0423", "278307:194"]).includes(":"));
+});
