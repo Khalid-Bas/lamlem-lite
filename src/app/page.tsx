@@ -2,17 +2,26 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Camera, canScan } from "@/lib/camera";
-import { buildBatch, linkCatalog, describeOrder, type BuildProgress, type BuildStats } from "@/lib/build-batch";
+import {
+  buildBatch, linkCatalog, describeOrder, findContentOutliers, explainDifference,
+  orderHasAlert, isAlertItem, confusableNames,
+  type BuildProgress, type BuildStats,
+} from "@/lib/build-batch";
 import { readCatalog } from "@/lib/catalog-load";
 import {
   clearAll, formatBytes, formatDuration, loadBatch, loadVideo,
   saveBatch, saveVideo, upsertRecord, usage,
 } from "@/lib/store";
 import { buildAliases, resolveScan } from "@/lib/barcode";
-import { driveConfigured, ensureFolder, folderName, getAccessToken, uploadFile, uploadText, safeFileName, clipFileName } from "@/lib/drive";
+import {
+  driveConfigured, ensureFolder, folderName, getAccessToken, uploadFile,
+  uploadText, safeFileName, clipFileName, canShareFiles, shareFiles,
+} from "@/lib/drive";
+import { carrierCode } from "@/lib/carriers";
 import {
   primeAudio, cueScanOk, cueScanFail, cueNeutral,
   cueOrderDone, cueGroupDone, cueBatchDone, speak, stopSpeaking, canSpeak,
+  startAmbient, stopAmbient,
 } from "@/lib/feedback";
 import { loadSettings, saveSettings, QUALITY, DEFAULTS, type Settings as Prefs } from "@/lib/settings";
 import { useBackGuard } from "@/lib/use-back-guard";
@@ -40,11 +49,19 @@ export default function App() {
   const [preview, setPreview] = useState<PackOrder | null>(null);
   /** Bumped once the camera exists, so the scanning effect can re-run. */
   const [camReady, setCamReady] = useState(0);
+  /** Look-twice items the packer has ticked for the order in progress. */
+  const [confirmedAlerts, setConfirmedAlerts] = useState<string[]>([]);
+  /** Whether the look-twice tone is running, so the header can explain it. */
+  const [ambientOn, setAmbientOn] = useState(false);
 
   // Group session state
   const [groupIds, setGroupIds] = useState<string[]>([]);
   const [verified, setVerified] = useState<string[]>([]);
   const [manualPick, setManualPick] = useState(false);
+  /** Orders in the group whose contents differ, awaiting a yes/no from the packer. */
+  const [mismatch, setMismatch] = useState<
+    { order: PackOrder; reasons: string[] }[] | null
+  >(null);
   const groupIdRef = useRef<string>("");
 
   /** Adds/ticks an order without scanning, for when a label will not read. */
@@ -124,6 +141,21 @@ export default function App() {
   const done = packedIds.size;
   const allDone = total > 0 && done === total;
 
+  /** Every distinct product name in the batch, for look-alike detection. */
+  const catalogNames = useMemo(
+    () => [...new Set((batch?.orders ?? []).flatMap((o) => o.items.map((it) => it.name)))],
+    [batch],
+  );
+
+  // Flagged items in the order being packed that have not been ticked yet.
+  const pendingAlerts = useMemo(() => {
+    if (!current) return [];
+    return current.items
+      .filter((it) => isAlertItem(it, prefs.alertProducts))
+      .map((it) => it.name)
+      .filter((n) => !confirmedAlerts.includes(n));
+  }, [current, prefs.alertProducts, confirmedAlerts]);
+
   /* ── camera: opened on demand, kept alive while a recording is running ── */
   const ensureCamera = useCallback(async (): Promise<Camera | null> => {
     if (!videoRef.current) return null;
@@ -146,10 +178,11 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => () => camRef.current?.stop(), []);
+  useEffect(() => () => { camRef.current?.stop(); stopAmbient(); }, []);
 
   useEffect(() => {
-    if (mode !== "packing" && mode !== "group-recording") return;
+    // group-verify is included: the recording is still running through it.
+    if (mode !== "packing" && mode !== "group-recording" && mode !== "group-verify") return;
     const id = setInterval(() => setElapsed(Date.now() - startedAtRef.current), 500);
     return () => clearInterval(id);
   }, [mode]);
@@ -163,6 +196,9 @@ export default function App() {
     const durationMs = Date.now() - startedAtRef.current;
     const blob = await cam.stopRecording();
     setRecording(false);
+    stopAmbient();
+    setAmbientOn(false);
+    setConfirmedAlerts([]);
     if (blob) await saveVideo(order.id, blob);
 
     const base = batchRef.current;
@@ -197,6 +233,14 @@ export default function App() {
     setFlash(null);
     camRef.current?.startRecording();
     setRecording(Boolean(camRef.current?.isRecording));
+
+    // A flagged item keeps a quiet tone running for the whole order, so the
+    // packer is aware they are on one without having to re-read the screen.
+    setConfirmedAlerts([]);
+    const flagged = orderHasAlert(order, prefsRef.current.alertProducts);
+    if (flagged) startAmbient();
+    else stopAmbient();
+    setAmbientOn(flagged);
   }, []);
 
   /* ── every scan lands here ── */
@@ -388,7 +432,9 @@ export default function App() {
     await openScanner("group-collect");
   }, [openScanner]);
 
-  const beginGroupRecording = useCallback(async () => {
+  /** Starts the group recording for real, once any mismatch has been accepted. */
+  const startGroupRecording = useCallback(async () => {
+    setMismatch(null);
     closeScanner();
     const cam = await ensureCamera();
     const now = Date.now();
@@ -399,16 +445,46 @@ export default function App() {
     modeRef.current = "group-recording";
     cam?.startRecording();
     setRecording(Boolean(cam?.isRecording));
+
+    const flagged = groupIdsRef.current
+      .map((id) => batchRef.current?.orders.find((o) => o.id === id))
+      .filter((o): o is PackOrder => Boolean(o))
+      .some((o) => orderHasAlert(o, prefsRef.current.alertProducts));
+    if (flagged) startAmbient();
+    else stopAmbient();
+    setAmbientOn(flagged);
   }, [closeScanner, ensureCamera]);
 
+  /**
+   * Gate before a group recording: are these boxes actually the same order?
+   *
+   * Packing several from one pile is only safe when they hold identical
+   * contents. Anything that differs — an extra item, a different quantity, a
+   * different variant — is shown in full before a frame is recorded.
+   */
+  const beginGroupRecording = useCallback(async () => {
+    const chosen = groupIdsRef.current
+      .map((id) => batchRef.current?.orders.find((o) => o.id === id))
+      .filter((o): o is PackOrder => Boolean(o));
+
+    const { outliers, reference } = findContentOutliers(chosen);
+    if (outliers.length > 0 && reference) {
+      cueScanFail();
+      setMismatch(
+        outliers.map((o) => ({ order: o, reasons: explainDifference(o, reference) })),
+      );
+      return;
+    }
+    await startGroupRecording();
+  }, [startGroupRecording]);
+
+  /**
+   * Moves from packing to verification **without** stopping the recording.
+   *
+   * The confirming re-scan of each sealed box is exactly the part worth having
+   * on film, so the camera keeps rolling until the last label is checked.
+   */
   const stopGroupRecording = useCallback(async () => {
-    const cam = camRef.current;
-    const blob = await cam?.stopRecording();
-    setRecording(false);
-    // Saved immediately, before verification: abandoning the check must never
-    // destroy footage that has already been filmed.
-    if (blob) await saveVideo(groupIdRef.current, blob);
-    (window as unknown as { __lamlemGroupBytes?: number }).__lamlemGroupBytes = blob?.size ?? 0;
     setVerified([]);
     setMode("group-verify");
     modeRef.current = "group-verify";
@@ -420,8 +496,15 @@ export default function App() {
       closeScanner();
       const base = batchRef.current;
       if (!base) return;
-      const bytes =
-        (window as unknown as { __lamlemGroupBytes?: number }).__lamlemGroupBytes ?? 0;
+
+      // The recording ran through the whole session, packing and verification
+      // alike; it is stopped here, once every box has been checked.
+      const blob = await camRef.current?.stopRecording();
+      setRecording(false);
+      stopAmbient();
+      setAmbientOn(false);
+      if (blob) await saveVideo(groupIdRef.current, blob);
+      const bytes = blob?.size ?? 0;
       const per = ids.length ? (Date.now() - startedAtRef.current) / ids.length : 0;
 
       let next = base;
@@ -481,7 +564,7 @@ export default function App() {
         <div className="bar">
           <i style={{ width: total ? `${(done / total) * 100}%` : "0%" }} />
         </div>
-        {(mode === "packing" || mode === "group-recording") && (
+        {(mode === "packing" || mode === "group-recording" || mode === "group-verify") && (
           <>
             <span className="timer">{formatDuration(elapsed)}</span>
             {recording ? (
@@ -489,6 +572,8 @@ export default function App() {
             ) : (
               <span className="chip">بلا فيديو</span>
             )}
+            {/* Names the hum, so it reads as a deliberate cue not a fault. */}
+            {ambientOn && <span className="chip alertchip">♪ صنف انتبه له</span>}
           </>
         )}
         {/* Available during packing too: opening the list only previews now, so
@@ -539,9 +624,18 @@ export default function App() {
 
         {mode === "packing" && current && (
           <>
-            <OrderCard order={current} />
+            <OrderCard
+              order={current}
+              alertNames={prefs.alertProducts}
+              catalogNames={catalogNames}
+              confirmed={confirmedAlerts}
+              onConfirm={(n) =>
+                setConfirmedAlerts((c) => (c.includes(n) ? c.filter((x) => x !== n) : [...c, n]))
+              }
+            />
             <button
               className="btn b-go"
+              disabled={pendingAlerts.length > 0}
               onClick={() =>
                 void (async () => {
                   const packed = currentRef.current;
@@ -552,7 +646,9 @@ export default function App() {
                 })()
               }
             >
-              تم — أنهِ هذا الطلب
+              {pendingAlerts.length > 0
+                ? `أكّد ${pendingAlerts.length} صنف للمتابعة`
+                : "تم — أنهِ هذا الطلب"}
             </button>
           </>
         )}
@@ -565,9 +661,12 @@ export default function App() {
             {groupOrders.map((o) => (
               <OrderCard key={o.id} order={o} compact />
             ))}
-            <button className="btn b-stop" onClick={() => void stopGroupRecording()}>
-              إيقاف التسجيل والتحقق
+            <button className="btn b-go" onClick={() => void stopGroupRecording()}>
+              انتهيت من التعبئة — تحقق من الطلبات
             </button>
+            <p className="note" style={{ textAlign: "center" }}>
+              التسجيل يستمر أثناء التحقق، ليظهر مسح كل بوليصة في الفيديو.
+            </p>
           </>
         )}
       </main>
@@ -593,7 +692,7 @@ export default function App() {
             scanFor === "group-collect"
               ? `اختيار المجموعة — ${groupIds.length} طلب`
               : scanFor === "group-verify"
-                ? `تحقق — ${verified.length} / ${groupIds.length}`
+                ? `تحقق — ${verified.length} / ${groupIds.length} · التسجيل مستمر`
                 : scanFor === "verify-one"
                   ? `تحقق — امسح بوليصة #${verifyOne?.orderNumber} مرة أخرى`
                   : "وجّه الكاميرا نحو الباركود"
@@ -717,6 +816,8 @@ export default function App() {
           packed={packedIds.has(preview.id)}
           record={batch?.records.find((r) => r.orderId === preview.id)}
           busyWith={current}
+          alertNames={prefs.alertProducts}
+          catalogNames={catalogNames}
           onClose={() => setPreview(null)}
           onStart={() => {
             const o = preview;
@@ -731,9 +832,25 @@ export default function App() {
         />
       )}
 
+      {mismatch && (
+        <MismatchWarning
+          items={mismatch}
+          onCancel={() => {
+            setMismatch(null);
+            closeScanner();
+            setGroupIds([]);
+            setVerified([]);
+            setMode("idle");
+            modeRef.current = "idle";
+          }}
+          onContinue={() => void startGroupRecording()}
+        />
+      )}
+
       {sheet === "settings" && (
         <SettingsSheet
           prefs={prefs}
+          productNames={catalogNames}
           onChange={updatePrefs}
           onClose={() => setSheet(null)}
         />
@@ -846,7 +963,16 @@ function GroupList({ orders, verified }: { orders: PackOrder[]; verified?: strin
 
 /* ══════════════ order card ══════════════ */
 
-function OrderCard({ order, compact }: { order: PackOrder; compact?: boolean }) {
+function OrderCard({
+  order, compact, alertNames = [], catalogNames = [], confirmed = [], onConfirm,
+}: {
+  order: PackOrder;
+  compact?: boolean;
+  alertNames?: string[];
+  catalogNames?: string[];
+  confirmed?: string[];
+  onConfirm?: (name: string) => void;
+}) {
   const single = order.items.length === 1 && !compact;
   return (
     <>
@@ -866,25 +992,28 @@ function OrderCard({ order, compact }: { order: PackOrder; compact?: boolean }) 
       </div>
 
       <div className="items" data-n={single ? 1 : 2}>
-        {order.items.map((it, i) => (
-          <div className="item" key={`${it.name}-${i}`}>
-            <div className="pic">
-              {it.imageUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={it.imageUrl}
-                  alt=""
-                  loading="eager"
-                  onError={(e) => {
-                    (e.currentTarget as HTMLImageElement).style.display = "none";
-                  }}
-                />
-              ) : (
-                <span>بلا صورة</span>
-              )}
-            </div>
-            {single ? (
-              <div className="row2">
+        {order.items.map((it, i) => {
+          const flagged = isAlertItem(it, alertNames);
+          const ticked = confirmed.includes(it.name);
+          const lookalikes = flagged ? confusableNames(it.name, catalogNames) : [];
+          return (
+            <div className={`item ${flagged ? "alert" : ""}`} key={`${it.name}-${i}`}>
+              <div className="pic">
+                {it.imageUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={it.imageUrl}
+                    alt=""
+                    loading="eager"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).style.display = "none";
+                    }}
+                  />
+                ) : (
+                  <span>بلا صورة</span>
+                )}
+              </div>
+              <div className={single ? "row2" : "contents"}>
                 <div className="txt">
                   <div className="nm">{it.name}</div>
                   {it.optionText && (
@@ -896,22 +1025,28 @@ function OrderCard({ order, compact }: { order: PackOrder; compact?: boolean }) 
                 </div>
                 <div className="qty">{it.quantity}</div>
               </div>
-            ) : (
-              <>
-                <div className="txt">
-                  <div className="nm">{it.name}</div>
-                  {it.optionText && (
-                    <div className={`opt ${it.optionVerified ? "" : "unsure"}`}>
-                      {it.optionText}
-                      {!it.optionVerified && " ⚠"}
-                    </div>
-                  )}
+
+              {/* Naming the look-alike is the useful part: it tells the packer
+                  exactly what to rule out, not just to be careful. */}
+              {lookalikes.length > 0 && (
+                <div className="notthis">
+                  ليس: {lookalikes.join(" · ")}
                 </div>
-                <div className="qty">{it.quantity}</div>
-              </>
-            )}
-          </div>
-        ))}
+              )}
+
+              {flagged && onConfirm && (
+                <button
+                  className={`confirmbar ${ticked ? "on" : ""}`}
+                  onClick={() => onConfirm(it.name)}
+                  aria-pressed={ticked}
+                >
+                  <span className="box">{ticked ? "✓" : ""}</span>
+                  {ticked ? "تم التأكيد" : "أكّد أنك وضعت هذا الصنف بالضبط"}
+                </button>
+              )}
+            </div>
+          );
+        })}
       </div>
     </>
   );
@@ -928,6 +1063,7 @@ function OrderCard({ order, compact }: { order: PackOrder; compact?: boolean }) 
  */
 function OrderPreview({
   order, index, count, onStep, packed, record, busyWith, onClose, onStart,
+  alertNames = [], catalogNames = [],
 }: {
   order: PackOrder;
   index: number;
@@ -938,6 +1074,8 @@ function OrderPreview({
   busyWith: PackOrder | null;
   onClose: () => void;
   onStart: () => void;
+  alertNames?: string[];
+  catalogNames?: string[];
 }) {
   // Horizontal swipe moves between orders, so a whole batch can be flicked
   // through without closing and reopening the list each time.
@@ -1019,7 +1157,7 @@ function OrderPreview({
           يجري الآن تجهيز #{busyWith!.orderNumber} — سيُحفظ قبل بدء هذا الطلب.
         </div>
       )}
-      <OrderCard order={order} />
+      <OrderCard order={order} alertNames={alertNames} catalogNames={catalogNames} />
     </Sheet>
   );
 }
@@ -1082,6 +1220,11 @@ function Summary({
   const [upload, setUpload] = useState<{ busy: boolean; msg: string }>({ busy: false, msg: "" });
   const relinkRef = useRef<HTMLInputElement>(null);
   const [relinkMsg, setRelinkMsg] = useState("");
+  // Probed once with a dummy file: the API is all-or-nothing per device.
+  const shareSupported = useMemo(
+    () => canShareFiles([new File([new Blob(["x"])], "a.webm", { type: "video/webm" })]),
+    [],
+  );
 
   useEffect(() => {
     void usage().then(setStore);
@@ -1117,14 +1260,56 @@ function Summary({
 
   const withVideo = clips.filter((c) => c.records[0].hasVideo).length;
 
-  /** `278290423 - 278307194 - … .webm`, every order the clip covers. */
+  /** `SMSA - 278290423 - 278307194 - … .webm`, every order the clip covers. */
   const clipName = (rs: PackRecord[]) =>
-    clipFileName(rs.map((r) => byId.get(r.orderId)?.orderNumber ?? r.orderId));
+    clipFileName(
+      rs.map((r) => byId.get(r.orderId)?.orderNumber ?? r.orderId),
+      carrierCode(rs.map((r) => byId.get(r.orderId)?.carrierId)),
+    );
 
   async function watch(rs: PackRecord[]) {
     const blob = await loadVideo(videoKeyOf(rs[0]));
     if (!blob) return;
     setPreview({ url: URL.createObjectURL(blob), label: clipName(rs) });
+  }
+
+  /** Builds File objects for a set of clips, ready to hand to the share sheet. */
+  async function filesFor(sets: PackRecord[][]): Promise<File[]> {
+    const out: File[] = [];
+    for (const rs of sets) {
+      const blob = await loadVideo(videoKeyOf(rs[0]));
+      if (blob) {
+        out.push(new File([blob], `${clipName(rs)}.webm`, { type: blob.type || "video/webm" }));
+      }
+    }
+    return out;
+  }
+
+  async function share(sets: PackRecord[][]) {
+    setUpload({ busy: true, msg: "جارٍ التجهيز للمشاركة…" });
+    try {
+      const files = await filesFor(sets);
+      if (files.length === 0) {
+        setUpload({ busy: false, msg: "لا فيديوهات للمشاركة" });
+        return;
+      }
+      if (!canShareFiles(files)) {
+        setUpload({
+          busy: false,
+          msg: "هذا الجهاز لا يدعم المشاركة المباشرة — استخدم «حفظ» ثم ارفعه من تطبيق Drive.",
+        });
+        return;
+      }
+      await shareFiles(files, "فيديوهات تجهيز الطلبات");
+      setUpload({ busy: false, msg: "" });
+    } catch (e) {
+      // A cancelled share sheet is not an error worth shouting about.
+      const aborted = e instanceof DOMException && e.name === "AbortError";
+      setUpload({
+        busy: false,
+        msg: aborted ? "" : "تعذّرت المشاركة — جرّب مرة أخرى أو استخدم «حفظ».",
+      });
+    }
   }
 
   async function download(rs: PackRecord[]) {
@@ -1217,14 +1402,23 @@ function Summary({
             <button
               className="btn b-drive"
               disabled={upload.busy || withVideo === 0}
-              onClick={() => void uploadAll()}
+              onClick={() => void share(clips.filter((c) => c.records[0].hasVideo).map((c) => c.records))}
             >
               {upload.busy
                 ? upload.msg
                 : withVideo === 0
-                  ? "لا فيديوهات للرفع بعد"
-                  : `رفع ${withVideo} فيديو إلى Drive`}
+                  ? "لا فيديوهات بعد"
+                  : `أرسل ${withVideo} فيديو إلى Drive`}
             </button>
+            {driveConfigured() && (
+              <button
+                className="btn b-ghost"
+                disabled={upload.busy || withVideo === 0}
+                onClick={() => void uploadAll()}
+              >
+                رفع تلقائي إلى مجلد Drive باسم الدفعة
+              </button>
+            )}
             <div className="b-row">
               <button className="btn b-line" onClick={() => relinkRef.current?.click()}>
                 ربط صور المنتجات
@@ -1302,6 +1496,11 @@ function Summary({
                     <button className="chip" onClick={() => void download(rs)}>
                       حفظ
                     </button>
+                    {shareSupported && (
+                      <button className="chip" onClick={() => void share([rs])}>
+                        مشاركة
+                      </button>
+                    )}
                   </span>
                 )}
               </div>
@@ -1505,13 +1704,22 @@ function Toggle({
 }
 
 function SettingsSheet({
-  prefs, onChange, onClose,
+  prefs, productNames, onChange, onClose,
 }: {
   prefs: Prefs;
+  productNames: string[];
   onChange: (p: Partial<Prefs>) => void;
   onClose: () => void;
 }) {
   const speech = canSpeak();
+  const [q, setQ] = useState("");
+  const shown = productNames.filter((n) => !q || n.includes(q));
+  const toggleAlert = (name: string) =>
+    onChange({
+      alertProducts: prefs.alertProducts.includes(name)
+        ? prefs.alertProducts.filter((n) => n !== name)
+        : [...prefs.alertProducts, name],
+    });
   return (
     <Sheet title="الإعدادات" onClose={onClose}>
       <Toggle
@@ -1555,6 +1763,104 @@ function SettingsSheet({
           تُطبَّق الجودة على التسجيل التالي — لن يتأثر تسجيل جارٍ الآن.
         </p>
       </div>
+
+      <div className="blk">
+        <b className="blk-title">أصناف تحتاج انتباهًا</b>
+        <p className="note">
+          عند تعبئة أي طلب يحتوي أحد هذه الأصناف: تعمل نغمة هادئة طوال التسجيل،
+          ويظهر تنبيه بالصنف المشابه الذي قد يُخلط معه، ويُطلب تأكيد قبل إنهاء
+          الطلب.
+        </p>
+        {productNames.length === 0 ? (
+          <p className="note">لا توجد أصناف بعد — ارفع دفعة أولًا.</p>
+        ) : (
+          <>
+            <input
+              className="searchbar"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="ابحث عن صنف"
+            />
+            <div className="list scrolly" style={{ maxHeight: "34dvh" }}>
+              {shown.map((n) => {
+                const on = prefs.alertProducts.includes(n);
+                return (
+                  <button className="lrow" key={n} onClick={() => toggleAlert(n)}>
+                    <span className="t">
+                      <b style={{ direction: "rtl", textAlign: "start", fontVariantNumeric: "normal" }}>
+                        {n}
+                      </b>
+                    </span>
+                    <span className={`chip ${on ? "done" : ""}`}>{on ? "مُفعّل" : "إضافة"}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
     </Sheet>
+  );
+}
+
+/* ══════════════ group mismatch warning ══════════════ */
+
+/**
+ * Red, unmissable, and specific.
+ *
+ * A browser `confirm()` was too easy to dismiss on autopilot, and it could not
+ * say *what* was different. This lists the exact reason per order — an extra
+ * ملعقة ماتشا, a quantity of 2 instead of 1 — so the decision takes a second
+ * rather than a guess.
+ */
+function MismatchWarning({
+  items, onCancel, onContinue,
+}: {
+  items: { order: PackOrder; reasons: string[] }[];
+  onCancel: () => void;
+  onContinue: () => void;
+}) {
+  return (
+    <div className="sheet" style={{ zIndex: 70 }}>
+      <div className="inner alarm" onClick={(e) => e.stopPropagation()}>
+        <div className="grab" />
+        <div className="alarm-head">
+          <span className="alarm-icon">⚠</span>
+          <h3 className="sheet-title">تحذير — طلب غير مطابق</h3>
+        </div>
+        <div className="scrolly">
+          <p className="alarm-lead">
+            {items.length === 1
+              ? "طلب واحد يختلف عن باقي الطلبات في قائمة التجهيز:"
+              : `${items.length} طلبات تختلف عن باقي الطلبات في قائمة التجهيز:`}
+          </p>
+          {items.map(({ order, reasons }) => (
+            <div className="alarm-card" key={order.id}>
+              <b>
+                #{order.orderNumber}
+                {order.customerName ? ` — ${order.customerName}` : ""}
+              </b>
+              <ul>
+                {reasons.map((r) => (
+                  <li key={r}>{r}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          <p className="note">
+            تعبئة طلبات مختلفة من كومة واحدة هو أكثر سبب لوضع الصنف الخطأ في
+            الصندوق. راجعها قبل المتابعة.
+          </p>
+        </div>
+        <div className="sheet-foot">
+          <button className="btn b-go" onClick={onCancel}>
+            إلغاء والعودة للرئيسية
+          </button>
+          <button className="btn b-stop" onClick={onContinue}>
+            متابعة رغم الاختلاف
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

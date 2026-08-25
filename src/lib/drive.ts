@@ -183,13 +183,6 @@ export function folderName(carrier: string | undefined, when: Date): string {
 }
 
 /**
- * Makes a string safe to use as a file name.
- *
- * Drive itself tolerates most characters, but these files get downloaded onto
- * Windows and macOS where `\ / : * ? " < > |` are illegal — a name containing
- * one can fail to save with no useful error.
- */
-/**
  * Names a clip after every order it contains: "278290423 - 278307194 - …".
  *
  * One recording can cover a whole group session, and the packer needs to find
@@ -197,15 +190,21 @@ export function folderName(carrier: string | undefined, when: Date): string {
  * than just the first. Long sessions are trimmed with a count, because most
  * filesystems refuse names beyond 255 characters.
  */
-export function clipFileName(orderNumbers: string[], limit = 180): string {
+export function clipFileName(
+  orderNumbers: string[],
+  carrier = "",
+  limit = 180,
+): string {
   if (orderNumbers.length === 0) return "unnamed";
-  const joined = orderNumbers.join(" - ");
+  // The carrier tag leads, so a folder of clips sorts and reads by courier.
+  const prefix = carrier ? `${carrier} - ` : "";
+  const joined = prefix + orderNumbers.join(" - ");
   if (joined.length <= limit) return safeFileName(joined, limit);
 
   // Reserve room for the "+ N طلب" tail before filling, or the tail itself
   // gets truncated away and the name silently claims to list every order.
   const tailFor = (n: number) => ` + ${n} طلب`;
-  const budget = limit - tailFor(orderNumbers.length).length;
+  const budget = limit - tailFor(orderNumbers.length).length - prefix.length;
 
   const kept: string[] = [];
   let len = 0;
@@ -216,9 +215,16 @@ export function clipFileName(orderNumbers: string[], limit = 180): string {
     len += add;
   }
   const rest = orderNumbers.length - kept.length;
-  return safeFileName(`${kept.join(" - ")}${tailFor(rest)}`, limit);
+  return safeFileName(`${prefix}${kept.join(" - ")}${tailFor(rest)}`, limit);
 }
 
+/**
+ * Makes a string safe to use as a file name.
+ *
+ * Drive itself tolerates most characters, but these files get downloaded onto
+ * Windows and macOS where \ / : * ? " < > | are illegal — a name containing
+ * one can fail to save with no useful error.
+ */
 export function safeFileName(s: string, max = 120): string {
   const cleaned = s
     .replace(/[\\/:*?"<>|]/g, "-")
@@ -226,4 +232,37 @@ export function safeFileName(s: string, max = 120): string {
     .replace(/[.\s]+$/, "")
     .trim();
   return (cleaned || "unnamed").slice(0, max);
+}
+
+/* ══════════════ sharing without any setup ══════════════ */
+
+/**
+ * Hands finished clips to Android's share sheet, where Drive is one of the
+ * targets — using the Google account the phone is already signed in to.
+ *
+ * This is the zero-setup path. A true background upload into a named Drive
+ * folder is only possible through the Drive API, which requires an OAuth client
+ * registered to this exact origin; there is no way for the app to reach a
+ * user's Drive without one. The share sheet gets to the same place in two taps
+ * and needs nothing configured.
+ */
+export function canShareFiles(files: File[]): boolean {
+  if (typeof navigator === "undefined") return false;
+  const n = navigator as Navigator & {
+    canShare?: (d: { files?: File[] }) => boolean;
+    share?: unknown;
+  };
+  if (!n.share || !n.canShare) return false;
+  try {
+    return n.canShare({ files });
+  } catch {
+    return false;
+  }
+}
+
+export async function shareFiles(files: File[], title: string): Promise<void> {
+  const n = navigator as Navigator & {
+    share: (d: { files?: File[]; title?: string; text?: string }) => Promise<void>;
+  };
+  await n.share({ files, title, text: title });
 }

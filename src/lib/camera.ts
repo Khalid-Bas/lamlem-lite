@@ -75,7 +75,7 @@ export class Camera {
   video: HTMLVideoElement;
   private quality: VideoQuality;
 
-  constructor(video: HTMLVideoElement, quality: VideoQuality = "balanced") {
+  constructor(video: HTMLVideoElement, quality: VideoQuality = "high") {
     this.video = video;
     this.quality = quality;
   }
@@ -123,8 +123,6 @@ export class Camera {
         facingMode: { ideal: "environment" },
         width: { ideal: q.width },
         height: { ideal: q.height },
-        // Frame rate comes from the preset: fewer frames leaves more bits for
-        // each one, which is what keeps small print readable at a low bitrate.
         frameRate: { ideal: q.fps, max: 30 },
       },
       audio: false,

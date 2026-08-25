@@ -122,3 +122,133 @@ test("strips characters that are illegal in a filename", () => {
   assert.ok(!clipFileName(["27829/0423", "278307:194"]).includes("/"));
   assert.ok(!clipFileName(["27829/0423", "278307:194"]).includes(":"));
 });
+
+/* ── group content matching ── */
+import { findContentOutliers, orderSignature } from "../src/lib/build-batch.ts";
+import type { PackOrder } from "../src/lib/types.ts";
+
+const ord = (n: string, items: { name: string; quantity: number; optionText?: string }[]): PackOrder => ({
+  id: `o-${n}`, orderNumber: n, paymentType: "prepaid", items,
+});
+
+test("treats identical contents as matching regardless of line order", () => {
+  const a = ord("1", [{ name: "ماتشا زعفراني 150 جرام", quantity: 1 }, { name: "استكر شيت", quantity: 2 }]);
+  const b = ord("2", [{ name: "استكر شيت", quantity: 2 }, { name: "ماتشا زعفراني 150 جرام", quantity: 1 }]);
+  assert.equal(orderSignature(a), orderSignature(b));
+  assert.deepEqual(findContentOutliers([a, b]).outliers, []);
+});
+
+test("flags the order that differs from the rest of the pile", () => {
+  const same = ["1", "2", "3"].map((n) => ord(n, [{ name: "ماتشا زعفراني 150 جرام", quantity: 1 }]));
+  const odd = ord("4", [{ name: "ماتشا احتفالية فاخرة 50 جرام", quantity: 1 }]);
+  const { outliers } = findContentOutliers([...same, odd]);
+  assert.equal(outliers.length, 1);
+  assert.equal(outliers[0].orderNumber, "4");
+});
+
+test("a different quantity counts as a mismatch", () => {
+  const a = ord("1", [{ name: "ماتشا", quantity: 1 }]);
+  const b = ord("2", [{ name: "ماتشا", quantity: 1 }]);
+  const c = ord("3", [{ name: "ماتشا", quantity: 2 }]);
+  assert.deepEqual(findContentOutliers([a, b, c]).outliers.map((o) => o.orderNumber), ["3"]);
+});
+
+test("a different chosen variant counts as a mismatch", () => {
+  const a = ord("1", [{ name: "بكج الجمعات", quantity: 1, optionText: "نوع الحليب: مشروب اوتلي" }]);
+  const b = ord("2", [{ name: "بكج الجمعات", quantity: 1, optionText: "نوع الحليب: مشروب اوتلي" }]);
+  const c = ord("3", [{ name: "بكج الجمعات", quantity: 1, optionText: "نوع الحليب: مشروب اوتسايد" }]);
+  assert.deepEqual(findContentOutliers([a, b, c]).outliers.map((o) => o.orderNumber), ["3"]);
+});
+
+test("orthographic differences alone are not a mismatch", () => {
+  const a = ord("1", [{ name: "بكج ماتشا وأدواتها", quantity: 1 }]);
+  const b = ord("2", [{ name: "بكج ماتشا وادواتها", quantity: 1 }]);
+  assert.deepEqual(findContentOutliers([a, b]).outliers, []);
+});
+
+/* ── carrier prefix in filenames ── */
+import { carrierCode } from "../src/lib/carriers.ts";
+
+test("prefixes a filename with the carrier tag", () => {
+  assert.equal(clipFileName(["2562445625"], "SMSA"), "SMSA - 2562445625");
+  assert.equal(
+    clipFileName(["25556554", "26554852"], "DN"),
+    "DN - 25556554 - 26554852",
+  );
+});
+
+test("maps carrier ids to short tags", () => {
+  assert.equal(carrierCode(["smsa"]), "SMSA");
+  assert.equal(carrierCode(["deliver_now"]), "DN");
+  assert.equal(carrierCode(["smsa", "smsa"]), "SMSA");
+  // A group spanning two couriers must not claim to be one of them.
+  assert.equal(carrierCode(["smsa", "deliver_now"]), "MIX");
+  assert.equal(carrierCode([undefined]), "");
+});
+
+test("an unknown carrier leaves the name unprefixed", () => {
+  assert.equal(clipFileName(["2562445625"], ""), "2562445625");
+});
+
+test("the carrier tag survives a trimmed long name", () => {
+  const many = Array.from({ length: 30 }, (_, i) => `2782904${String(i).padStart(2, "0")}`);
+  const name = clipFileName(many, "SMSA");
+  assert.ok(name.startsWith("SMSA - "), `got ${name}`);
+  assert.ok(name.length <= 180);
+  assert.ok(name.includes("طلب"));
+});
+
+/* ── explaining a group mismatch ── */
+import { explainDifference, confusableNames } from "../src/lib/build-batch.ts";
+
+test("names the extra item that makes an order different", () => {
+  const ref = ord("1", [{ name: "ماتشا زعفراني 150 جرام", quantity: 1 }]);
+  const odd = ord("2", [
+    { name: "ماتشا زعفراني 150 جرام", quantity: 1 },
+    { name: "ملعقة ماتشا", quantity: 1 },
+  ]);
+  const reasons = explainDifference(odd, ref);
+  assert.ok(reasons.some((r) => r.includes("صنف إضافي") && r.includes("ملعقة ماتشا")), reasons.join(" | "));
+  assert.ok(reasons.some((r) => r.includes("عدد الأصناف 2 بدل 1")), reasons.join(" | "));
+});
+
+test("names a missing item and a wrong quantity", () => {
+  const ref = ord("1", [
+    { name: "ماتشا زعفراني 150 جرام", quantity: 1 },
+    { name: "استكر شيت", quantity: 2 },
+  ]);
+  const odd = ord("2", [{ name: "ماتشا زعفراني 150 جرام", quantity: 3 }]);
+  const reasons = explainDifference(odd, ref);
+  assert.ok(reasons.some((r) => r.includes("صنف ناقص") && r.includes("استكر شيت")), reasons.join(" | "));
+  assert.ok(reasons.some((r) => r.includes("الكمية 3 بدل 1")), reasons.join(" | "));
+});
+
+/* ── look-alike products ── */
+test("flags the product most easily confused with a watched one", () => {
+  const all = [
+    "ماتشا احتفالية فاخرة 50 جرام",
+    "ماتشا زعفراني 150 جرام",
+    "استكر شيت من تصميم قوت",
+    "كرتون قهوة أثيوبي",
+  ];
+  const near = confusableNames("ماتشا احتفالية فاخرة 50 جرام", all);
+  assert.ok(near.includes("ماتشا زعفراني 150 جرام"), near.join(" | "));
+  assert.ok(!near.includes("كرتون قهوة أثيوبي"));
+});
+
+test("an unmistakable product has no look-alikes", () => {
+  const all = ["كرتون قهوة أثيوبي", "استكر شيت من تصميم قوت"];
+  assert.deepEqual(confusableNames("كرتون قهوة أثيوبي", all), []);
+});
+
+test("one shared word is not enough to call two products confusable", () => {
+  // Regression: "شاي ماتشا 150g" and "ملعقة ماتشا" share only "ماتشا" — a tea
+  // and a spoon are not mistaken for each other.
+  const all = ["شاي ماتشا 150g", "ملعقة ماتشا"];
+  assert.deepEqual(confusableNames("شاي ماتشا 150g", all), []);
+});
+
+test("pairs the two coffee cartons, which differ only by origin", () => {
+  const all = ["كرتون قهوة أثيوبي", "كرتون قهوة كولومبي", "استكر شيت"];
+  assert.deepEqual(confusableNames("كرتون قهوة أثيوبي", all), ["كرتون قهوة كولومبي"]);
+});

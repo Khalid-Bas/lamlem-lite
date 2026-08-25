@@ -202,3 +202,137 @@ export function describeOrder(order: PackOrder): string {
   });
   return parts.join("، و ");
 }
+
+/**
+ * Signature of what an order physically contains.
+ *
+ * Used to spot the odd one out when several orders are packed together: if
+ * four boxes hold "1 × ماتشا زعفراني 150 جرام" and the fifth holds something
+ * else, packing them from one pile is how the wrong item ends up in a box.
+ *
+ * Built from the resolved catalog name, the chosen variant and the quantity —
+ * not the order number — and sorted, so line order never matters.
+ */
+export function orderSignature(order: PackOrder): string {
+  return order.items
+    .map((it) => `${foldArabic(it.name)}|${foldArabic(it.optionText ?? "")}|${it.quantity}`)
+    .sort()
+    .join(" ++ ");
+}
+
+/**
+ * Splits a set of orders into the dominant contents and any that differ.
+ * The majority signature wins; everything else is reported as an outlier.
+ */
+export function findContentOutliers(orders: PackOrder[]): {
+  majority: string;
+  /** An order that represents the dominant contents, for explaining diffs. */
+  reference?: PackOrder;
+  outliers: PackOrder[];
+} {
+  if (orders.length === 0) return { majority: "", outliers: [] };
+
+  const counts = new Map<string, number>();
+  for (const o of orders) {
+    const sig = orderSignature(o);
+    counts.set(sig, (counts.get(sig) ?? 0) + 1);
+  }
+
+  let majority = "";
+  let best = -1;
+  for (const [sig, n] of counts) {
+    if (n > best) {
+      best = n;
+      majority = sig;
+    }
+  }
+
+  return {
+    majority,
+    reference: orders.find((o) => orderSignature(o) === majority),
+    outliers: orders.filter((o) => orderSignature(o) !== majority),
+  };
+}
+
+/**
+ * Plain-language reasons an order differs from the rest of the pile.
+ *
+ * A bare "this one is different" is not actionable at the bench — the packer
+ * needs to know it is the extra ملعقة ماتشا, so they can decide in a second
+ * whether it matters.
+ */
+export function explainDifference(order: PackOrder, reference: PackOrder): string[] {
+  const key = (it: PackItem) => `${foldArabic(it.name)}|${foldArabic(it.optionText ?? "")}`;
+  const label = (it: PackItem) => `${it.name}${it.optionText ? ` (${it.optionText})` : ""}`;
+
+  const mine = new Map(order.items.map((it) => [key(it), it]));
+  const theirs = new Map(reference.items.map((it) => [key(it), it]));
+  const out: string[] = [];
+
+  if (order.items.length !== reference.items.length) {
+    out.push(`عدد الأصناف ${order.items.length} بدل ${reference.items.length}`);
+  }
+
+  for (const [k, it] of mine) {
+    if (!theirs.has(k)) out.push(`صنف إضافي: ${label(it)}`);
+  }
+  for (const [k, it] of theirs) {
+    if (!mine.has(k)) out.push(`صنف ناقص: ${label(it)}`);
+  }
+  for (const [k, it] of mine) {
+    const other = theirs.get(k);
+    if (other && other.quantity !== it.quantity) {
+      out.push(`${it.name}: الكمية ${it.quantity} بدل ${other.quantity}`);
+    }
+  }
+
+  return out.length ? out : ["محتويات مختلفة عن باقي الطلبات"];
+}
+
+/** True when any line of this order is on the look-twice list. */
+export function orderHasAlert(order: PackOrder, alertNames: string[]): boolean {
+  if (alertNames.length === 0) return false;
+  const flagged = new Set(alertNames.map(foldArabic));
+  return order.items.some((it) => flagged.has(foldArabic(it.name)));
+}
+
+export function isAlertItem(item: PackItem, alertNames: string[]): boolean {
+  return alertNames.some((n) => foldArabic(n) === foldArabic(item.name));
+}
+
+/**
+ * Catalog entries whose names are close enough to be grabbed by mistake.
+ *
+ * Mis-packing here is not random: it happens between products that read almost
+ * the same on a shelf label — "ماتشا احتفالية فاخرة 50 جرام" and
+ * "ماتشا زعفراني 150 جرام" share their first word and their shape. Naming the
+ * specific look-alike on the packing card is far more useful than a generic
+ * "check carefully", because it tells the packer what to rule out.
+ */
+export function confusableNames(name: string, allNames: string[], max = 2): string[] {
+  const tokens = (s: string) => foldArabic(s).split(" ").filter(Boolean);
+  const mine = tokens(name);
+  if (mine.length === 0) return [];
+
+  const scored = allNames
+    .filter((other) => foldArabic(other) !== foldArabic(name))
+    .map((other) => {
+      const theirs = tokens(other);
+      const shared = theirs.filter((t) => mine.includes(t)).length;
+      // Dice coefficient rather than shared/longest: a short name like
+      // "بكج ماتشا وادواتها أبيض" is a real look-alike for the longer
+      // "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود", but dividing by the
+      // longer length alone scored it below threshold and hid the warning.
+      const overlap = (2 * shared) / (mine.length + theirs.length);
+      return { other, overlap, shared };
+    })
+    // Overlap alone, with no requirement to share the opening word: the
+    // standalone "ماتشا احتفالية فاخرة 50 جرام" and the bundle that contains
+    // it are a real mix-up, and they start with different words.
+    // At least two words in common: one shared word is far too weak — it
+    // paired "شاي ماتشا" with "ملعقة ماتشا", a tea and a spoon.
+    .filter((c) => c.shared >= 2 && c.overlap >= 0.4)
+    .sort((a, b) => b.overlap - a.overlap);
+
+  return scored.slice(0, max).map((c) => c.other);
+}

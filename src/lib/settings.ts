@@ -16,14 +16,21 @@ export interface Settings {
   /** After finishing an order, ask for a confirming re-scan. */
   verifyAfterPack: boolean;
   videoQuality: VideoQuality;
+  /**
+   * Products that get a continuous tone while being packed, and a mandatory
+   * confirm tap. For items that are easy to grab by mistake.
+   */
+  alertProducts: string[];
 }
 
 export const DEFAULTS: Settings = {
   voice: true,
   verifyAfterPack: true,
-  // Full 1080p, but at a frame rate and bitrate tuned for a mostly-static
-  // bench: text stays readable at roughly half the size of the "high" preset.
-  videoQuality: "balanced",
+  // The setting that was confirmed legible on a real label. Dropping the frame
+  // rate to save space looked worse in practice than the theory predicted, so
+  // full quality is the default and size is traded on bitrate alone.
+  videoQuality: "high",
+  alertProducts: [],
 };
 
 const KEY = "lamlem.settings.v1";
@@ -55,13 +62,10 @@ export function saveSettings(s: Settings): void {
 /**
  * Capture settings per quality step.
  *
- * Resolution is what makes printed text legible, so the balanced preset keeps
- * the full 1920×1080 and saves space on the other two axes instead.
- *
- * Frame rate is the useful lever: at a fixed bitrate, halving the frame rate
- * roughly doubles the bits available to each frame, so 15fps at 2.5 Mbps holds
- * detail better per frame than 24fps at the same bitrate — while producing a
- * far smaller file. Packing is slow, deliberate movement; 15fps is plenty.
+ * All presets record at 1080p24. An earlier attempt saved space by halving the
+ * frame rate — on the theory that fewer frames leaves more bits for each one —
+ * but on a real device the result looked clearly worse, so frame rate is left
+ * alone and size is traded on bitrate only.
  */
 export const QUALITY: Record<
   VideoQuality,
@@ -78,25 +82,25 @@ export const QUALITY: Record<
     width: 1920,
     height: 1080,
     fps: 24,
-    bitrate: 5_000_000,
-    label: "أعلى وضوح (1080p)",
-    note: "أنعم حركة وأدق تفاصيل · ~٣٧ ميجابايت للدقيقة",
+    bitrate: 6_000_000,
+    label: "أعلى وضوح (1080p) — موصى بها",
+    note: "أوضح للنصوص على البوليصة · ~٤٥ ميجابايت للدقيقة",
   },
   balanced: {
     width: 1920,
     height: 1080,
-    fps: 15,
-    bitrate: 2_500_000,
-    label: "متوازنة (1080p) — موصى بها",
-    note: "نفس الوضوح للنصوص بنصف الحجم · ~١٩ ميجابايت للدقيقة",
+    fps: 24,
+    bitrate: 3_500_000,
+    label: "متوازنة (1080p)",
+    note: "نفس الدقة والحركة بحجم أقل · ~٢٦ ميجابايت للدقيقة",
   },
   saver: {
     width: 1280,
     height: 720,
-    fps: 15,
-    bitrate: 1_200_000,
+    fps: 24,
+    bitrate: 2_000_000,
     label: "موفّرة (720p)",
-    note: "الأصغر حجمًا · ~٩ ميجابايت للدقيقة",
+    note: "الأصغر حجمًا · ~١٥ ميجابايت للدقيقة",
   },
 };
 

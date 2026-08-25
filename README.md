@@ -19,7 +19,7 @@ your customer data leaves the device.
 | **Scan** | Tap **مسح الباركود**. The camera opens only for the scan, then closes. Counter at the top reads `3 / 30`. |
 | **Pack** | Large product photos with quantities. Recording starts automatically; a timer runs. The camera preview is hidden — the scan button sits in its place. |
 | **Next** | Tap **مسح الباركود** and scan the next label: the current order is saved and the new one starts in one move. Or tap **تم** to just finish. |
-| **Group** | **تجهيز مجموعة طلبات** — scan several labels, start one recording, pack them together, stop, then re-scan each label to confirm. All of them are marked done and share the clip. |
+| **Group** | **تجهيز مجموعة طلبات** — scan several labels, pack them together, then re-scan each label to confirm. **The recording runs through the whole session, verification included**, so the confirming scan of every sealed box is on film. All of them are marked done and share one clip. |
 | **Summary** | Per-order time, customer name, video size, **مشاهدة** to preview in place, **حفظ** to download, and **رفع … فيديو إلى Drive** — available at any time, not only once the batch is finished. |
 
 Tapping an order in **الطلبات** opens a **read-only preview** — items, photos,
@@ -29,17 +29,40 @@ being packed the button says so and asks first; the running recording keeps
 going while you look. Previewing an order that is already done offers
 **إعادة التعبئة والتسجيل**, which warns that the stored video will be replaced.
 
+Before a group recording starts, the app compares what every selected order
+actually contains — product, chosen variant and quantity — and stops on a full
+red screen if one differs, naming the exact reason: *صنف إضافي: ملعقة ماتشا*,
+*عدد الأصناف 2 بدل 1*, *الكمية 3 بدل 1*. Continuing is deliberate; cancelling
+returns to the home screen with nothing recorded. Packing several boxes from one
+pile only works when they hold the same thing, and this is where that goes wrong.
+
+## Guarding against packing the wrong item
+
+Flag the products that are easy to grab by mistake under **الإعدادات → أصناف
+تحتاج انتباهًا**. While any order containing one is being packed:
+
+- a **calm two-note tone plays for the whole recording**, with a **♪ صنف انتبه
+  له** chip in the header so the hum reads as a deliberate cue, not a fault
+- the item card turns amber and names the products it is most easily confused
+  with — *ليس: ماتشا زعفراني 150 جرام* — because telling the packer what to rule
+  out is far more useful than "check carefully"
+- the order cannot be finished until the item is explicitly ticked
+
+The look-alikes are worked out from the batch itself, by word overlap: it pairs
+the black and white matcha bundles, the Ethiopian and Colombian coffee cartons,
+and a standalone product with the bundle that contains it — while ignoring weak
+pairs that merely share one word, like a matcha tea and a matcha spoon.
+
 Scanning is **only** active while the scanner is on screen. During packing the
 detector is off, so a label lying on the bench cannot end the order or restart
 the recording.
 
 **الإعدادات** (on the main screen) holds three switches: read the order aloud
 when a label scans, ask for a confirming re-scan after each order, and video
-quality. All presets keep enough resolution to read a label back; the default
-**متوازنة** is full 1080p at 15fps and 2.5 Mbps (~19 MB/min), about half the
-size of the **أعلى وضوح** preset. Frame rate is the lever that matters: at a
-fixed bitrate, fewer frames means more bits per frame, so 15fps actually holds
-*more* per-frame detail than 24fps would at the same size.
+quality. All presets record 1080p at 24fps; only the bitrate changes.
+**أعلى وضوح** (6 Mbps, ~45 MB/min) is the default and the one confirmed
+legible on a real label. **متوازنة** (3.5 Mbps, ~26 MB/min) and **موفّرة**
+(720p, ~15 MB/min) trade sharpness for space.
 
 After an order is finished, the app asks for a confirming re-scan of the sealed
 box. Scanning the wrong label says which order it actually belongs to and keeps
@@ -75,17 +98,31 @@ Push to GitHub, then import at [vercel.com/new](https://vercel.com/new) and set
 the **Root Directory to `lamlem-lite`**. No environment variables, no database,
 nothing to configure.
 
-## Google Drive upload (optional)
+## Getting videos into Drive
 
-The Drive button sits in **الملخص** and is available whenever at least one
-video exists — you do not have to finish the batch first. It creates a folder
-named after the carrier and the batch date — `SMSA - 24/08/2026` — and uploads
-one file per recording, named `رقم الطلب - اسم العميل.webm`.
+**أرسل … فيديو إلى Drive** in **الملخص** needs no setup at all. It hands the
+clips to Android's share sheet, where Drive appears as a target and uses the
+Google account the phone is already signed in to. Two taps, nothing to
+configure. Individual clips also get a **مشاركة** button.
+
+There is no way to make this fully automatic without setup: reaching a user's
+Drive silently requires the Drive API, and that requires an OAuth client
+registered to this exact origin. Google does not allow an app to write to your
+Drive just because the browser is signed in. The optional path below does give
+you a named folder and unattended upload, at the cost of a one-time setup.
+
+### Optional: unattended upload into a named folder
+
+With `NEXT_PUBLIC_GOOGLE_CLIENT_ID` set, a second button appears that creates a
+folder named after the carrier and batch date — `SMSA - 24/08/2026` — and
+uploads every clip plus a CSV manifest without a share sheet.
 
 A group session produces **one** clip covering all its orders, so the summary
 lists it as a single row and offers a single **حفظ** — there is no need to
-download the same file once per order. Its filename lists every order number
-(`276288899 - 276371802 - 276451900 - 276484102.webm`), trimmed with a count if
+download the same file once per order. Filenames lead with the carrier — `SMSA - 2562445625.webm`,
+`DN - 25556554 - 26554852.webm`, and `MIX` when a group spans two couriers — so
+a folder of clips sorts by courier at a glance. A group clip lists every order
+number it covers, trimmed with a count if
 a session is long enough to exceed the 255-character filename limit. The same
 name is used whether you save to the phone or upload. Alongside the videos it writes a
 `… - الملخّص.csv` manifest listing every order, its customer, duration and which

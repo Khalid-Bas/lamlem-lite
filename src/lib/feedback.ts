@@ -153,3 +153,70 @@ export function cueBatchDone(): void {
     [1318.5, 0.5, 0.45],
   ]);
 }
+
+/* ══════════════ ambient alert while packing ══════════════ */
+
+let ambient: { osc: OscillatorNode[]; gain: GainNode; lfo: OscillatorNode } | null = null;
+
+/**
+ * A soft, continuous pad that plays for as long as a flagged item is being
+ * packed.
+ *
+ * Deliberately calm rather than an alarm: it runs for the whole order, and
+ * anything sharp would be unbearable by the tenth box. Two sine voices a fifth
+ * apart, breathing slowly via an LFO — present enough to notice you are on a
+ * look-twice item, quiet enough to ignore while working.
+ */
+export function startAmbient(): void {
+  const ac = audio();
+  if (!ac || ambient) return;
+  try {
+    const gain = ac.createGain();
+    gain.gain.setValueAtTime(0.0001, ac.currentTime);
+    // Fade in over a second: an abrupt start reads as an error sound.
+    gain.gain.exponentialRampToValueAtTime(0.06, ac.currentTime + 1);
+    gain.connect(ac.destination);
+
+    // A + E, a perfect fifth — consonant, so it never sounds like a fault.
+    const osc = [220, 330].map((f) => {
+      const o = ac.createOscillator();
+      o.type = "sine";
+      o.frequency.setValueAtTime(f, ac.currentTime);
+      o.connect(gain);
+      o.start();
+      return o;
+    });
+
+    // Slow swell, roughly one breath every four seconds.
+    const lfo = ac.createOscillator();
+    const lfoGain = ac.createGain();
+    lfo.frequency.setValueAtTime(0.25, ac.currentTime);
+    lfoGain.gain.setValueAtTime(0.03, ac.currentTime);
+    lfo.connect(lfoGain).connect(gain.gain);
+    lfo.start();
+
+    ambient = { osc, gain, lfo };
+  } catch {
+    // Audio is a helper here; never let it break packing.
+  }
+}
+
+export function stopAmbient(): void {
+  const ac = audio();
+  if (!ambient || !ac) return;
+  const { osc, gain, lfo } = ambient;
+  ambient = null;
+  try {
+    gain.gain.cancelScheduledValues(ac.currentTime);
+    gain.gain.setValueAtTime(Math.max(gain.gain.value, 0.0001), ac.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 0.4);
+    for (const o of osc) o.stop(ac.currentTime + 0.5);
+    lfo.stop(ac.currentTime + 0.5);
+  } catch {
+    /* already stopped */
+  }
+}
+
+export function isAmbientPlaying(): boolean {
+  return ambient !== null;
+}

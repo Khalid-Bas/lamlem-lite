@@ -12,6 +12,8 @@ export interface CarrierTemplate {
   /** Display name, Arabic first since the whole UI is Arabic. */
   name: string;
   nameEn: string;
+  /** Short tag that prefixes saved video filenames, e.g. "SMSA - 2562445625". */
+  code: string;
   /** Any of these appearing in the document identifies the carrier. */
   signals: RegExp[];
   /** Ordered patterns tried against label text to extract the tracking number. */
@@ -26,6 +28,7 @@ export interface CarrierTemplate {
 export const CARRIERS: CarrierTemplate[] = [
   {
     id: "smsa",
+    code: "SMSA",
     name: "سمسا",
     nameEn: "SMSA",
     signals: [/سمسا/, /\bSMSA\b/i, /MASTER\s*#/i, /\bSAAKJ\b/i],
@@ -39,6 +42,7 @@ export const CARRIERS: CarrierTemplate[] = [
   },
   {
     id: "deliver_now",
+    code: "DN",
     name: "دليفر ناو",
     nameEn: "Deliver Now",
     signals: [/دليفر\s*ناو/, /Deliver\s*Now/i, /\bDNL\d/],
@@ -49,6 +53,7 @@ export const CARRIERS: CarrierTemplate[] = [
   },
   {
     id: "aramex",
+    code: "ARX",
     name: "أرامكس",
     nameEn: "Aramex",
     signals: [/أرامكس/, /ارامكس/, /\bAramex\b/i],
@@ -56,6 +61,7 @@ export const CARRIERS: CarrierTemplate[] = [
   },
   {
     id: "spl",
+    code: "SPL",
     name: "البريد السعودي",
     nameEn: "Saudi Post (SPL)",
     signals: [/البريد\s*السعودي/, /\bSPL\b/i, /سبل/],
@@ -63,6 +69,7 @@ export const CARRIERS: CarrierTemplate[] = [
   },
   {
     id: "imile",
+    code: "IML",
     name: "آي مايل",
     nameEn: "iMile",
     signals: [/آي\s*مايل/, /\biMile\b/i],
@@ -70,6 +77,7 @@ export const CARRIERS: CarrierTemplate[] = [
   },
   {
     id: "jt",
+    code: "JT",
     name: "جي آند تي",
     nameEn: "J&T Express",
     signals: [/جي\s*اند\s*تي/, /J&T/i],
@@ -111,4 +119,18 @@ export function detectPaymentMethod(
 ): { label: string; cod: boolean } | undefined {
   const hit = PAYMENT_METHODS.find((p) => p.pattern.test(text));
   return hit ? { label: hit.label, cod: hit.cod } : undefined;
+}
+
+/**
+ * Short carrier tag for a filename.
+ *
+ * Files land in one Drive folder and one phone downloads folder, so leading
+ * with the carrier makes a batch sortable and scannable at a glance.
+ * A mixed group gets "MIX" rather than a misleading single carrier.
+ */
+export function carrierCode(ids: (string | undefined)[]): string {
+  const codes = [...new Set(ids.map((id) => carrierById(id)?.code).filter(Boolean))];
+  if (codes.length === 1) return codes[0] as string;
+  if (codes.length > 1) return "MIX";
+  return "";
 }
