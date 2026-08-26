@@ -292,12 +292,20 @@ export function explainDifference(order: PackOrder, reference: PackOrder): strin
 /** True when any line of this order is on the look-twice list. */
 export function orderHasAlert(order: PackOrder, alertNames: string[]): boolean {
   if (alertNames.length === 0) return false;
-  const flagged = new Set(alertNames.map(foldArabic));
-  return order.items.some((it) => flagged.has(foldArabic(it.name)));
+  // Defers to isAlertItem so the two can never drift apart: they did once,
+  // and the card lit up while the music stayed silent.
+  return order.items.some((it) => isAlertItem(it, alertNames));
 }
 
 export function isAlertItem(item: PackItem, alertNames: string[]): boolean {
-  return alertNames.some((n) => foldArabic(n) === foldArabic(item.name));
+  const name = foldArabic(item.name);
+  // Substring, not equality: flagging "ماتشا احتفالية فاخرة 50 جرام" should
+  // also catch "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود", which is the
+  // same product inside a bundle and just as easy to grab by mistake.
+  return alertNames.some((n) => {
+    const needle = foldArabic(n);
+    return needle.length > 0 && (name.includes(needle) || needle.includes(name));
+  });
 }
 
 /**

@@ -156,46 +156,70 @@ export function cueBatchDone(): void {
 
 /* ══════════════ ambient alert while packing ══════════════ */
 
-let ambient: { osc: OscillatorNode[]; gain: GainNode; lfo: OscillatorNode } | null = null;
+let ambient: { out: GainNode; timer: ReturnType<typeof setInterval> } | null = null;
 
 /**
- * A soft, continuous pad that plays for as long as a flagged item is being
- * packed.
+ * Quiet piano that plays for as long as a flagged item is being packed.
  *
- * Deliberately calm rather than an alarm: it runs for the whole order, and
- * anything sharp would be unbearable by the tenth box. Two sine voices a fifth
- * apart, breathing slowly via an LFO — present enough to notice you are on a
- * look-twice item, quiet enough to ignore while working.
+ * Deliberately music rather than an alarm: it runs for the whole order, and
+ * anything sharp would be unbearable by the tenth box. It has to stay
+ * *noticeable*, though — the earlier sustained drone blended into warehouse
+ * noise and stopped registering after a minute, which defeats the point.
  */
 export function startAmbient(): void {
   const ac = audio();
   if (!ac || ambient) return;
   try {
-    const gain = ac.createGain();
-    gain.gain.setValueAtTime(0.0001, ac.currentTime);
+    const out = ac.createGain();
+    out.gain.setValueAtTime(0.0001, ac.currentTime);
     // Fade in over a second: an abrupt start reads as an error sound.
-    gain.gain.exponentialRampToValueAtTime(0.06, ac.currentTime + 1);
-    gain.connect(ac.destination);
+    out.gain.exponentialRampToValueAtTime(0.5, ac.currentTime + 1);
+    out.connect(ac.destination);
 
-    // A + E, a perfect fifth — consonant, so it never sounds like a fault.
-    const osc = [220, 330].map((f) => {
-      const o = ac.createOscillator();
-      o.type = "sine";
-      o.frequency.setValueAtTime(f, ac.currentTime);
-      o.connect(gain);
-      o.start();
-      return o;
-    });
+    /**
+     * A slow piano-ish arpeggio rather than a held drone.
+     *
+     * A sustained two-note pad blends into warehouse noise and stops being
+     * noticed after a minute. Repeating plucked notes stay audible without
+     * being harsh, and read as "music playing" rather than "something is
+     * broken". Each note is a decaying sine plus a quieter octave, which is
+     * roughly what makes a struck string sound like one.
+     */
+    const NOTES = [523.25, 659.25, 783.99, 1046.5, 783.99, 659.25]; // C E G C G E
+    const STEP = 0.62;
+    let step = 0;
 
-    // Slow swell, roughly one breath every four seconds.
-    const lfo = ac.createOscillator();
-    const lfoGain = ac.createGain();
-    lfo.frequency.setValueAtTime(0.25, ac.currentTime);
-    lfoGain.gain.setValueAtTime(0.03, ac.currentTime);
-    lfo.connect(lfoGain).connect(gain.gain);
-    lfo.start();
+    const pluck = (freq: number, at: number) => {
+      for (const [mult, level] of [[1, 0.22], [2, 0.07]] as const) {
+        const o = ac.createOscillator();
+        const g = ac.createGain();
+        o.type = "sine";
+        o.frequency.setValueAtTime(freq * mult, at);
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.exponentialRampToValueAtTime(level, at + 0.012);
+        // Long exponential tail — the decay is what sells it as a piano.
+        g.gain.exponentialRampToValueAtTime(0.0001, at + 1.5);
+        o.connect(g).connect(out);
+        o.start(at);
+        o.stop(at + 1.6);
+      }
+    };
 
-    ambient = { osc, gain, lfo };
+    // Scheduled a little ahead of time so the rhythm never stutters, and
+    // driven by a timer so it keeps going for as long as the order is open.
+    const schedule = () => {
+      const now = ac.currentTime;
+      while (nextAt < now + 1.2) {
+        pluck(NOTES[step % NOTES.length], nextAt);
+        step++;
+        nextAt += STEP;
+      }
+    };
+    let nextAt = ac.currentTime + 0.05;
+    schedule();
+    const timer = setInterval(schedule, 400);
+
+    ambient = { out, timer };
   } catch {
     // Audio is a helper here; never let it break packing.
   }
@@ -204,19 +228,42 @@ export function startAmbient(): void {
 export function stopAmbient(): void {
   const ac = audio();
   if (!ambient || !ac) return;
-  const { osc, gain, lfo } = ambient;
+  const { out, timer } = ambient;
   ambient = null;
   try {
-    gain.gain.cancelScheduledValues(ac.currentTime);
-    gain.gain.setValueAtTime(Math.max(gain.gain.value, 0.0001), ac.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 0.4);
-    for (const o of osc) o.stop(ac.currentTime + 0.5);
-    lfo.stop(ac.currentTime + 0.5);
+    // Stop scheduling new notes, then fade what is already sounding.
+    clearInterval(timer);
+    out.gain.cancelScheduledValues(ac.currentTime);
+    out.gain.setValueAtTime(Math.max(out.gain.value, 0.0001), ac.currentTime);
+    out.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 0.5);
+    setTimeout(() => {
+      try {
+        out.disconnect();
+      } catch {
+        /* already detached */
+      }
+    }, 700);
   } catch {
     /* already stopped */
   }
 }
 
+/** True while the look-twice music is sounding. */
 export function isAmbientPlaying(): boolean {
   return ambient !== null;
+}
+
+/**
+ * Scanning a label whose order contains a flagged item: a long, unmistakable
+ * buzz plus a low double note, distinct from the ordinary scan tick.
+ */
+export function cueAlertScan(): void {
+  navigator.vibrate?.([180, 90, 180]);
+  play(
+    [
+      [392, 0, 0.18],
+      [523.25, 0.2, 0.3],
+    ],
+    0.26,
+  );
 }

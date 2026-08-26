@@ -128,8 +128,32 @@ export function detectPaymentMethod(
  * with the carrier makes a batch sortable and scannable at a glance.
  * A mixed group gets "MIX" rather than a misleading single carrier.
  */
-export function carrierCode(ids: (string | undefined)[]): string {
-  const codes = [...new Set(ids.map((id) => carrierById(id)?.code).filter(Boolean))];
+/**
+ * Short tag for a set of orders: "SMSA", "DN", or "MIX" when they disagree.
+ *
+ * Accepts the carrier name as a fallback, because batches saved before the id
+ * was recorded still carry the printed name — without this they would silently
+ * lose their filename prefix.
+ */
+export function carrierCode(
+  refs: ({ carrierId?: string; carrierName?: string } | string | undefined)[],
+): string {
+  const codes = [
+    ...new Set(
+      refs
+        .map((r) => {
+          const ref = typeof r === "string" || r === undefined ? { carrierId: r } : r;
+          const byId = carrierById(ref.carrierId)?.code;
+          if (byId) return byId;
+          const name = ref.carrierName?.trim();
+          if (!name) return undefined;
+          return CARRIERS.find(
+            (c) => c.name === name || c.nameEn.toLowerCase() === name.toLowerCase(),
+          )?.code;
+        })
+        .filter(Boolean),
+    ),
+  ];
   if (codes.length === 1) return codes[0] as string;
   if (codes.length > 1) return "MIX";
   return "";

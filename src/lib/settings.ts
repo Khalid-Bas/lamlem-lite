@@ -8,7 +8,7 @@
  * the way it wipes the batch.
  */
 
-export type VideoQuality = "high" | "balanced" | "saver";
+export type VideoQuality = "ultra" | "high" | "balanced" | "saver";
 
 export interface Settings {
   /** Read the order's contents aloud when a label scans. */
@@ -62,10 +62,14 @@ export function saveSettings(s: Settings): void {
 /**
  * Capture settings per quality step.
  *
- * All presets record at 1080p24. An earlier attempt saved space by halving the
- * frame rate — on the theory that fewer frames leaves more bits for each one —
- * but on a real device the result looked clearly worse, so frame rate is left
- * alone and size is traded on bitrate only.
+ * Resolution is what makes small print on a shipping label readable, so the
+ * top preset records 1440p — a modern Android flagship encodes it in hardware
+ * without breaking a sweat, and it is a real step up from 1080p for text while
+ * costing far less than 4K would.
+ *
+ * Frame rate stays at 30 across the board. An earlier attempt to save space by
+ * halving it looked clearly worse on a real device, so size is traded on
+ * bitrate and resolution only.
  */
 export const QUALITY: Record<
   VideoQuality,
@@ -78,29 +82,37 @@ export const QUALITY: Record<
     note: string;
   }
 > = {
+  ultra: {
+    width: 2560,
+    height: 1440,
+    fps: 30,
+    bitrate: 9_000_000,
+    label: "فائقة (1440p)",
+    note: "أوضح ما يمكن لقراءة النصوص · ~٦٧ ميجابايت للدقيقة",
+  },
   high: {
     width: 1920,
     height: 1080,
-    fps: 24,
-    bitrate: 6_000_000,
-    label: "أعلى وضوح (1080p) — موصى بها",
-    note: "أوضح للنصوص على البوليصة · ~٤٥ ميجابايت للدقيقة",
+    fps: 30,
+    bitrate: 7_000_000,
+    label: "عالية (1080p) — موصى بها",
+    note: "واضحة للبوليصة بحجم معقول · ~٥٢ ميجابايت للدقيقة",
   },
   balanced: {
     width: 1920,
     height: 1080,
-    fps: 24,
-    bitrate: 3_500_000,
+    fps: 30,
+    bitrate: 4_000_000,
     label: "متوازنة (1080p)",
-    note: "نفس الدقة والحركة بحجم أقل · ~٢٦ ميجابايت للدقيقة",
+    note: "نفس الدقة بحجم أقل · ~٣٠ ميجابايت للدقيقة",
   },
   saver: {
     width: 1280,
     height: 720,
-    fps: 24,
-    bitrate: 2_000_000,
+    fps: 30,
+    bitrate: 2_500_000,
     label: "موفّرة (720p)",
-    note: "الأصغر حجمًا · ~١٥ ميجابايت للدقيقة",
+    note: "الأصغر حجمًا · ~١٩ ميجابايت للدقيقة",
   },
 };
 

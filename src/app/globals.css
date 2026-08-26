@@ -219,3 +219,10 @@ img{display:block;max-width:100%}
   background:var(--panel-2);color:var(--ink);font-size:16px}
 .searchbar::placeholder{color:var(--ink-3)}
 .chip.alertchip{background:var(--warn);color:#1A1206}
+
+/* ─── group mismatch: loud on purpose, this is a wrong-box risk ─── */
+.mismatch{background:#3A1417;border:2px solid var(--stop);border-radius:16px;padding:14px;
+  display:flex;flex-direction:column;gap:8px}
+.mismatch b{color:#FFC9C9;font-size:16px}
+.mismatch span{color:#FFB4B4;font-size:12.5px;line-height:1.7}
+.mismatch ul{margin:0;padding-inline-start:18px;color:#FFD9D9;font-size:13px;line-height:1.9}

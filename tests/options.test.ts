@@ -252,3 +252,87 @@ test("pairs the two coffee cartons, which differ only by origin", () => {
   const all = ["كرتون قهوة أثيوبي", "كرتون قهوة كولومبي", "استكر شيت"];
   assert.deepEqual(confusableNames("كرتون قهوة أثيوبي", all), ["كرتون قهوة كولومبي"]);
 });
+
+/* ── drive folder targeting ── */
+import { dayFolderName } from "../src/lib/drive.ts";
+
+test("names the day folder the way a person reads a date", () => {
+  assert.equal(dayFolderName(new Date(2026, 7, 26)), "26 Aug 2026");
+  assert.equal(dayFolderName(new Date(2026, 0, 3)), "3 Jan 2026");
+});
+
+/* ── carrier tag falls back to the printed name ── */
+test("derives the carrier tag from the name when the id is missing", () => {
+  // Batches saved before the id was recorded still carry the Arabic name.
+  assert.equal(carrierCode([{ carrierName: "دليفر ناو" }]), "DN");
+  assert.equal(carrierCode([{ carrierName: "سمسا" }]), "SMSA");
+  assert.equal(carrierCode([{ carrierId: "smsa", carrierName: "سمسا" }]), "SMSA");
+  assert.equal(carrierCode([{ carrierName: "لا أحد" }]), "");
+});
+
+/* ── flagged products match inside bundles ── */
+import { isAlertItem, orderHasAlert } from "../src/lib/build-batch.ts";
+
+test("a flagged product is caught inside a bundle name too", () => {
+  const flagged = ["ماتشا احتفالية فاخرة 50 جرام"];
+  assert.equal(
+    isAlertItem({ name: "ماتشا احتفالية فاخرة 50 جرام", quantity: 1 }, flagged),
+    true,
+  );
+  // The same product inside a bundle is just as easy to grab by mistake.
+  assert.equal(
+    isAlertItem(
+      { name: "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود", quantity: 1 },
+      flagged,
+    ),
+    true,
+  );
+  assert.equal(
+    isAlertItem({ name: "ماتشا زعفراني 150 جرام", quantity: 1 }, flagged),
+    false,
+  );
+});
+
+test("flagging a short keyword covers every variant of it", () => {
+  const flagged = ["ماتشا احتفالية"];
+  assert.equal(isAlertItem({ name: "ماتشا احتفالية فاخرة 50 جرام", quantity: 1 }, flagged), true);
+  assert.equal(isAlertItem({ name: "شاي ماتشا 150g", quantity: 1 }, flagged), false);
+});
+
+/* ── an order that differs only by an extra item is caught ── */
+test("six orders with one extra item flags exactly that order", () => {
+  const same = ["1", "2", "3", "4", "5"].map((n) =>
+    ord(n, [{ name: "ماتشا زعفراني 150 جرام", quantity: 1 }]),
+  );
+  const odd = ord("6", [
+    { name: "ماتشا زعفراني 150 جرام", quantity: 1 },
+    { name: "ملعقة ماتشا", quantity: 1 },
+  ]);
+  const { outliers } = findContentOutliers([...same, odd]);
+  assert.deepEqual(outliers.map((o) => o.orderNumber), ["6"]);
+});
+
+test("a wholly different product among matching orders is caught", () => {
+  const same = ["1", "2", "3", "4", "5"].map((n) =>
+    ord(n, [{ name: "ماتشا زعفراني 150 جرام", quantity: 1 }]),
+  );
+  const odd = ord("6", [{ name: "ماتشا احتفالية فاخرة 50 جرام", quantity: 1 }]);
+  const { outliers } = findContentOutliers([...same, odd]);
+  assert.deepEqual(outliers.map((o) => o.orderNumber), ["6"]);
+  const reasons = explainDifference(odd, same[0]);
+  assert.ok(reasons.length > 0, "the difference is explained, not just flagged");
+});
+
+test("order-level and item-level alert checks agree", () => {
+  // Regression: orderHasAlert matched exactly while isAlertItem matched by
+  // substring, so a flagged bundle showed the warning but played no music.
+  const flagged = ["ماتشا احتفالية"];
+  const order = ord("1", [
+    { name: "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود", quantity: 1 },
+  ]);
+  assert.equal(orderHasAlert(order, flagged), true);
+  assert.equal(isAlertItem(order.items[0], flagged), true);
+
+  const plain = ord("2", [{ name: "شاي ماتشا 150g", quantity: 1 }]);
+  assert.equal(orderHasAlert(plain, flagged), false);
+});

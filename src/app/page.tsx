@@ -16,12 +16,13 @@ import { buildAliases, resolveScan } from "@/lib/barcode";
 import {
   driveConfigured, ensureFolder, folderName, getAccessToken, uploadFile,
   uploadText, safeFileName, clipFileName, canShareFiles, shareFiles,
+  targetFolderId, dayFolderName,
 } from "@/lib/drive";
 import { carrierCode } from "@/lib/carriers";
 import {
   primeAudio, cueScanOk, cueScanFail, cueNeutral,
-  cueOrderDone, cueGroupDone, cueBatchDone, speak, stopSpeaking, canSpeak,
-  startAmbient, stopAmbient,
+  cueOrderDone, cueGroupDone, cueBatchDone, cueAlertScan,
+  speak, stopSpeaking, canSpeak, startAmbient, stopAmbient,
 } from "@/lib/feedback";
 import { loadSettings, saveSettings, QUALITY, DEFAULTS, type Settings as Prefs } from "@/lib/settings";
 import { useBackGuard } from "@/lib/use-back-guard";
@@ -53,6 +54,16 @@ export default function App() {
   const [confirmedAlerts, setConfirmedAlerts] = useState<string[]>([]);
   /** Whether the look-twice tone is running, so the header can explain it. */
   const [ambientOn, setAmbientOn] = useState(false);
+  /** Clip the summary should open as soon as it mounts. */
+  const [pendingWatch, setPendingWatch] = useState<PackRecord[] | null>(null);
+  /** Reminder shown after a flagged order is filmed, before it is handed over. */
+  const [reviewPrompt, setReviewPrompt] = useState<
+    { orderNumber: string; records: PackRecord[] } | null
+  >(null);
+  /** A scanned order that does not match the rest of the group being built. */
+  const [groupWarn, setGroupWarn] = useState<
+    { orderNumber: string; reasons: string[]; total: number; addedNumber?: string } | null
+  >(null);
 
   // Group session state
   const [groupIds, setGroupIds] = useState<string[]>([]);
@@ -64,14 +75,56 @@ export default function App() {
   >(null);
   const groupIdRef = useRef<string>("");
 
+  /**
+   * Adds one order to the group being collected, from a scan or a manual tap.
+   *
+   * Both paths run the same match check — an order added by hand can break the
+   * "everything in this pile is identical" assumption just as easily as a
+   * mis-scanned label.
+   */
+  const addToGroup = useCallback((id: string): void => {
+    if (groupIdsRef.current.includes(id)) {
+      const o = batchRef.current?.orders.find((x) => x.id === id);
+      setFlash({ kind: "warn", text: `#${o?.orderNumber ?? ""} مضاف مسبقًا` });
+      cueNeutral();
+      return;
+    }
+
+    const nextIds = [...groupIdsRef.current, id];
+    groupIdsRef.current = nextIds;
+    setGroupIds(nextIds);
+
+    const chosen = nextIds
+      .map((x) => batchRef.current?.orders.find((o) => o.id === x))
+      .filter((o): o is PackOrder => Boolean(o));
+    const { outliers } = findContentOutliers(chosen);
+
+    if (outliers.length > 0) {
+      // Prefer naming the order just added; otherwise adding this one made an
+      // earlier pick the odd one out, and that is what needs pointing at.
+      const added = batchRef.current?.orders.find((o) => o.id === id);
+      const odd = outliers.find((o) => o.id === id) ?? outliers[0];
+      const ref = chosen.find((o) => !outliers.includes(o));
+      cueScanFail();
+      setGroupWarn({
+        orderNumber: odd.orderNumber,
+        reasons: ref ? explainDifference(odd, ref) : [],
+        total: nextIds.length,
+        addedNumber: added?.orderNumber,
+      });
+      return;
+    }
+
+    setGroupWarn(null);
+    cueScanOk();
+    const o = batchRef.current?.orders.find((x) => x.id === id);
+    setFlash({ kind: "ok", text: `أُضيف #${o?.orderNumber ?? ""}` });
+  }, []);
+
   /** Adds/ticks an order without scanning, for when a label will not read. */
   const addManually = useCallback((id: string) => {
     if (modeRef.current === "group-collect") {
-      setGroupIds((ids) => {
-        if (ids.includes(id)) { cueNeutral(); return ids; }
-        cueScanOk();
-        return [...ids, id];
-      });
+      addToGroupRef.current(id);
     } else if (modeRef.current === "group-verify") {
       setVerified((v) => {
         if (v.includes(id)) { cueNeutral(); return v; }
@@ -80,6 +133,9 @@ export default function App() {
       });
     }
   }, []);
+
+  const addToGroupRef = useRef(addToGroup);
+  addToGroupRef.current = addToGroup;
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const camRef = useRef<Camera | null>(null);
@@ -217,6 +273,15 @@ export default function App() {
       // The last order of a batch gets its own, unmistakable flourish.
       if (next.records.length >= next.orders.length) cueBatchDone();
       else cueOrderDone();
+
+      // A flagged order is exactly the one worth watching back before the box
+      // leaves the bench, while it can still be opened and corrected.
+      if (blob && orderHasAlert(order, prefsRef.current.alertProducts)) {
+        setReviewPrompt({
+          orderNumber: order.orderNumber,
+          records: next.records.filter((r) => r.orderId === order.id),
+        });
+      }
     }
     setCurrent(null);
   }, []);
@@ -263,16 +328,7 @@ export default function App() {
       const m = modeRef.current;
 
       if (m === "group-collect") {
-        setGroupIds((ids) => {
-          if (ids.includes(order.id)) {
-            setFlash({ kind: "warn", text: `#${order.orderNumber} مضاف مسبقًا` });
-            cueNeutral();
-            return ids;
-          }
-          cueScanOk();
-          setFlash({ kind: "ok", text: `أُضيف #${order.orderNumber}` });
-          return [...ids, order.id];
-        });
+        addToGroupRef.current(order.id);
         return;
       }
 
@@ -330,7 +386,10 @@ export default function App() {
         return;
       }
       if (active) await finishCurrent();
-      cueScanOk();
+      // A flagged order gets its own long buzz, so the packer feels the
+      // difference before looking at the screen.
+      if (orderHasAlert(order, prefsRef.current.alertProducts)) cueAlertScan();
+      else cueScanOk();
       setScanFor(null);
       beginOrder(order);
       // Announce what goes in the box, so the packer need not look up.
@@ -426,6 +485,7 @@ export default function App() {
   const startGroup = useCallback(async () => {
     setGroupIds([]);
     setVerified([]);
+    setGroupWarn(null);
     groupIdRef.current = `g${Date.now().toString(36)}`;
     setMode("group-collect");
     modeRef.current = "group-collect";
@@ -653,6 +713,52 @@ export default function App() {
           </>
         )}
 
+        {/* Closing the scanner mid-collection used to leave a blank screen with
+            no way back. The collected orders stay put and can be resumed. */}
+        {mode === "group-collect" && !scanFor && (
+          <>
+            <h3 style={{ fontSize: 16 }}>
+              مجموعة قيد الاختيار — {groupIds.length} طلب
+            </h3>
+            {groupWarn && (
+              <div className="mismatch">
+                <b>تحذير: الطلب #{groupWarn.orderNumber} غير مطابق</b>
+                {groupWarn.reasons.length > 0 && (
+                  <ul>
+                    {groupWarn.reasons.map((r) => (
+                      <li key={r}>{r}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            <GroupList orders={groupOrders} />
+            <button className="btn b-scan" onClick={() => void openScanner("group-collect")}>
+              <ScanIcon />
+              أضف طلبًا آخر
+            </button>
+            <button
+              className="btn b-go"
+              disabled={groupIds.length === 0}
+              onClick={() => void beginGroupRecording()}
+            >
+              ابدأ التسجيل ({groupIds.length})
+            </button>
+            <button
+              className="btn b-ghost"
+              onClick={() => {
+                groupIdsRef.current = [];
+                setGroupIds([]);
+                setGroupWarn(null);
+                setMode("idle");
+                modeRef.current = "idle";
+              }}
+            >
+              إلغاء المجموعة
+            </button>
+          </>
+        )}
+
         {mode === "group-recording" && (
           <>
             <h3 style={{ fontSize: 16 }}>
@@ -708,6 +814,49 @@ export default function App() {
           footer={
             scanFor === "group-collect" ? (
               <>
+                {groupWarn && (
+                  <div className="mismatch">
+                    <b>تحذير: الطلب #{groupWarn.orderNumber} غير مطابق</b>
+                    {groupWarn.addedNumber &&
+                      groupWarn.addedNumber !== groupWarn.orderNumber && (
+                        <span>
+                          ظهر الاختلاف بعد إضافة #{groupWarn.addedNumber}.
+                        </span>
+                      )}
+                    <span>
+                      تجهيز مجموعة يفترض أن كل الطلبات متطابقة تمامًا في الأصناف
+                      وعددها.
+                    </span>
+                    {groupWarn.reasons.length > 0 && (
+                      <ul>
+                        {groupWarn.reasons.map((r) => (
+                          <li key={r}>{r}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <div className="b-row">
+                      <button
+                        className="btn b-stop"
+                        onClick={() => {
+                          // Drop it from the group and carry on collecting.
+                          const keep = groupIdsRef.current.filter(
+                            (id) =>
+                              batchRef.current?.orders.find((o) => o.id === id)
+                                ?.orderNumber !== groupWarn.orderNumber,
+                          );
+                          groupIdsRef.current = keep;
+                          setGroupIds(keep);
+                          setGroupWarn(null);
+                        }}
+                      >
+                        احذفه من المجموعة
+                      </button>
+                      <button className="btn b-line" onClick={() => setGroupWarn(null)}>
+                        أبقِه رغم الاختلاف
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <GroupList orders={groupOrders} />
                 <button className="btn b-ghost" onClick={() => setManualPick((v) => !v)}>
                   {manualPick ? "إخفاء الإضافة اليدوية" : "إضافة يدويًا"}
@@ -847,6 +996,40 @@ export default function App() {
         />
       )}
 
+      {reviewPrompt && (
+        <Sheet
+          title={`راجع الفيديو — #${reviewPrompt.orderNumber}`}
+          onClose={() => setReviewPrompt(null)}
+          footer={
+            <>
+              <button
+                className="btn b-go"
+                onClick={() => {
+                  const rs = reviewPrompt.records;
+                  setReviewPrompt(null);
+                  setSheet("summary");
+                  // Land straight on the clip rather than making them hunt.
+                  setTimeout(() => setPendingWatch(rs), 250);
+                }}
+              >
+                شاهد الفيديو الآن
+              </button>
+              <button className="btn b-line" onClick={() => setReviewPrompt(null)}>
+                تخطَّ
+              </button>
+            </>
+          }
+        >
+          <div className="mismatch" style={{ background: "#2A2113", borderColor: "var(--warn)" }}>
+            <b style={{ color: "#F2D18B" }}>هذا الطلب يحتوي صنفًا تحتاج الانتباه له</b>
+            <span style={{ color: "#F2D18B" }}>
+              راجع الفيديو وتأكد من الصنف قبل تسليم الطرد لشركة الشحن — بعد
+              التسليم لا يمكن فتح الصندوق وتصحيحه.
+            </span>
+          </div>
+        </Sheet>
+      )}
+
       {sheet === "settings" && (
         <SettingsSheet
           prefs={prefs}
@@ -860,6 +1043,8 @@ export default function App() {
         <Summary
           batch={batch}
           allDone={allDone}
+          autoWatch={pendingWatch}
+          onAutoWatched={() => setPendingWatch(null)}
           onClose={() => setSheet(null)}
           onReset={async () => {
             await clearAll();
@@ -1207,10 +1392,12 @@ function Sheet({
 /* ══════════════ summary ══════════════ */
 
 function Summary({
-  batch, allDone, onClose, onReset, onRelink,
+  batch, allDone, onClose, onReset, onRelink, autoWatch, onAutoWatched,
 }: {
   batch: Batch;
   allDone: boolean;
+  autoWatch?: PackRecord[] | null;
+  onAutoWatched?: () => void;
   onClose: () => void;
   onReset: () => Promise<void>;
   onRelink: (f: File) => Promise<string>;
@@ -1229,6 +1416,14 @@ function Summary({
   useEffect(() => {
     void usage().then(setStore);
   }, []);
+
+  // Opened straight from the "review this clip" reminder.
+  useEffect(() => {
+    if (!autoWatch?.length) return;
+    void watch(autoWatch);
+    onAutoWatched?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoWatch]);
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview.url); }, [preview]);
 
   const byId = new Map(batch.orders.map((o) => [o.id, o]));
@@ -1264,7 +1459,7 @@ function Summary({
   const clipName = (rs: PackRecord[]) =>
     clipFileName(
       rs.map((r) => byId.get(r.orderId)?.orderNumber ?? r.orderId),
-      carrierCode(rs.map((r) => byId.get(r.orderId)?.carrierId)),
+      carrierCode(rs.map((r) => byId.get(r.orderId))),
     );
 
   async function watch(rs: PackRecord[]) {
@@ -1273,43 +1468,81 @@ function Summary({
     setPreview({ url: URL.createObjectURL(blob), label: clipName(rs) });
   }
 
-  /** Builds File objects for a set of clips, ready to hand to the share sheet. */
-  async function filesFor(sets: PackRecord[][]): Promise<File[]> {
-    const out: File[] = [];
-    for (const rs of sets) {
-      const blob = await loadVideo(videoKeyOf(rs[0]));
-      if (blob) {
-        out.push(new File([blob], `${clipName(rs)}.webm`, { type: blob.type || "video/webm" }));
-      }
-    }
-    return out;
-  }
+  /**
+   * Share needs the files in hand *before* the tap.
+   *
+   * navigator.share() only works while the browser still considers the tap
+   * "active" — about a second. Reading tens of megabytes out of IndexedDB
+   * inside the click handler blew through that every time, and Chrome rejected
+   * the share with NotAllowedError. Wrapping the blobs up front costs nothing
+   * (a File wraps a disk-backed Blob, it does not copy it) and makes the
+   * handler synchronous.
+   */
+  const [readyFiles, setReadyFiles] = useState<Map<string, File>>(new Map());
 
-  async function share(sets: PackRecord[][]) {
-    setUpload({ busy: true, msg: "جارٍ التجهيز للمشاركة…" });
-    try {
-      const files = await filesFor(sets);
-      if (files.length === 0) {
-        setUpload({ busy: false, msg: "لا فيديوهات للمشاركة" });
-        return;
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const map = new Map<string, File>();
+      for (const clip of clips) {
+        if (!clip.records[0].hasVideo) continue;
+        const blob = await loadVideo(clip.key);
+        if (cancelled) return;
+        if (blob) {
+          map.set(
+            clip.key,
+            new File([blob], `${clipName(clip.records)}.webm`, {
+              type: blob.type || "video/webm",
+            }),
+          );
+        }
       }
-      if (!canShareFiles(files)) {
-        setUpload({
-          busy: false,
-          msg: "هذا الجهاز لا يدعم المشاركة المباشرة — استخدم «حفظ» ثم ارفعه من تطبيق Drive.",
-        });
-        return;
-      }
-      await shareFiles(files, "فيديوهات تجهيز الطلبات");
-      setUpload({ busy: false, msg: "" });
-    } catch (e) {
-      // A cancelled share sheet is not an error worth shouting about.
-      const aborted = e instanceof DOMException && e.name === "AbortError";
+      if (!cancelled) setReadyFiles(map);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batch]);
+
+  function share(sets: PackRecord[][]) {
+    const files = sets
+      .map((rs) => readyFiles.get(videoKeyOf(rs[0])))
+      .filter((f): f is File => Boolean(f));
+
+    if (files.length === 0) {
       setUpload({
         busy: false,
-        msg: aborted ? "" : "تعذّرت المشاركة — جرّب مرة أخرى أو استخدم «حفظ».",
+        msg: readyFiles.size === 0 ? "جارٍ تجهيز الفيديوهات… أعد المحاولة بعد لحظة" : "لا فيديوهات للمشاركة",
       });
+      return;
     }
+    if (!canShareFiles(files)) {
+      setUpload({
+        busy: false,
+        msg: "هذا الجهاز لا يدعم المشاركة المباشرة — استخدم «حفظ» ثم ارفعه من تطبيق Drive.",
+      });
+      return;
+    }
+
+    // Called synchronously so the tap is still "active" as far as Chrome is
+    // concerned; anything awaited before this point loses that permission.
+    shareFiles(files, "فيديوهات تجهيز الطلبات")
+      .then(() => setUpload({ busy: false, msg: "" }))
+      .catch((e: unknown) => {
+        const name = e instanceof DOMException ? e.name : "";
+        if (name === "AbortError") {
+          setUpload({ busy: false, msg: "" });
+          return;
+        }
+        setUpload({
+          busy: false,
+          msg:
+            name === "NotAllowedError"
+              ? "رفض المتصفح المشاركة — اضغط الزر مباشرة دون انتظار، أو استخدم «حفظ»."
+              : "تعذّرت المشاركة — جرّب مرة أخرى أو استخدم «حفظ».",
+        });
+      });
   }
 
   async function download(rs: PackRecord[]) {
@@ -1335,11 +1568,19 @@ function Summary({
     setUpload({ busy: true, msg: "جارٍ تسجيل الدخول إلى Google…" });
     try {
       const token = await getAccessToken();
-      const carrier =
-        batch.orders.find((o) => o.carrierName)?.carrierName ?? "Orders";
-      const name = folderName(carrier, new Date(batch.createdAt));
+
+      // With a target folder configured, file everything under a dated folder
+      // inside it — "26 Aug 2026" — so a day's work lands in one place.
+      // Without one, fall back to a carrier-and-date folder at the Drive root.
+      const parent = targetFolderId();
+      const name = parent
+        ? dayFolderName(new Date(batch.createdAt))
+        : folderName(
+            batch.orders.find((o) => o.carrierName)?.carrierName ?? "Orders",
+            new Date(batch.createdAt),
+          );
       setUpload({ busy: true, msg: `تجهيز المجلد «${name}»…` });
-      const folderId = await ensureFolder(token, name);
+      const folderId = await ensureFolder(token, name, parent);
 
       // One upload per clip, named the same way the summary names it, so a
       // file downloaded to the phone and the one in Drive match.
@@ -1745,7 +1986,7 @@ function SettingsSheet({
       <div className="blk">
         <b className="blk-title">جودة الفيديو</b>
         <div className="list">
-          {(["high", "balanced", "saver"] as const).map((q) => (
+          {(["ultra", "high", "balanced", "saver"] as const).map((q) => (
             <button
               key={q}
               className="lrow"
@@ -1771,16 +2012,44 @@ function SettingsSheet({
           ويظهر تنبيه بالصنف المشابه الذي قد يُخلط معه، ويُطلب تأكيد قبل إنهاء
           الطلب.
         </p>
+        {/* Already-flagged keywords, including ones typed by hand that are not
+            in the current batch. */}
+        {prefs.alertProducts.length > 0 && (
+          <div className="list">
+            {prefs.alertProducts.map((n) => (
+              <button className="lrow" key={n} onClick={() => toggleAlert(n)}>
+                <span className="t">
+                  <b style={{ direction: "rtl", textAlign: "start", fontVariantNumeric: "normal" }}>
+                    {n}
+                  </b>
+                  <span>يشمل أي صنف يحتوي هذه الكلمات</span>
+                </span>
+                <span className="chip done">إزالة</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <input
+          className="searchbar"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="اكتب اسم صنف أو كلمة منه"
+        />
+        {q.trim().length > 1 && !prefs.alertProducts.includes(q.trim()) && (
+          // Lets a product be flagged before it ever appears in a batch, and
+          // lets a short keyword stand in for every variant of a name.
+          <button className="btn b-line" onClick={() => { toggleAlert(q.trim()); setQ(""); }}>
+            أضف «{q.trim()}» ككلمة تنبيه
+          </button>
+        )}
+
         {productNames.length === 0 ? (
-          <p className="note">لا توجد أصناف بعد — ارفع دفعة أولًا.</p>
+          <p className="note">
+            لا أصناف من دفعة حالية — تقدر تكتب الكلمة يدويًا بالأعلى.
+          </p>
         ) : (
           <>
-            <input
-              className="searchbar"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="ابحث عن صنف"
-            />
             <div className="list scrolly" style={{ maxHeight: "34dvh" }}>
               {shown.map((n) => {
                 const on = prefs.alertProducts.includes(n);

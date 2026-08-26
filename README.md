@@ -29,8 +29,8 @@ being packed the button says so and asks first; the running recording keeps
 going while you look. Previewing an order that is already done offers
 **إعادة التعبئة والتسجيل**, which warns that the stored video will be replaced.
 
-Before a group recording starts, the app compares what every selected order
-actually contains — product, chosen variant and quantity — and stops on a full
+The moment a label joins a group — scanned or tapped in by hand — the app
+compares what every selected order actually contains — product, chosen variant and quantity — and stops on a full
 red screen if one differs, naming the exact reason: *صنف إضافي: ملعقة ماتشا*,
 *عدد الأصناف 2 بدل 1*, *الكمية 3 بدل 1*. Continuing is deliberate; cancelling
 returns to the home screen with nothing recorded. Packing several boxes from one
@@ -39,10 +39,16 @@ pile only works when they hold the same thing, and this is where that goes wrong
 ## Guarding against packing the wrong item
 
 Flag the products that are easy to grab by mistake under **الإعدادات → أصناف
-تحتاج انتباهًا**. While any order containing one is being packed:
+تحتاج انتباهًا** — either tap one from the batch, or type a keyword such as
+*ماتشا احتفالية*, which then matches every variant including the bundle that
+contains it. While any order containing one is being packed:
 
-- a **calm two-note tone plays for the whole recording**, with a **♪ صنف انتبه
-  له** chip in the header so the hum reads as a deliberate cue, not a fault
+- **quiet piano plays for the whole recording**, with a **♪ صنف انتبه له** chip
+  in the header so it reads as a deliberate cue, not a fault. It replaced a
+  sustained drone, which blended into warehouse noise and stopped registering
+- scanning the label gives a **longer, distinct buzz** than an ordinary scan
+- after filming, a reminder offers to **play the clip back before the box is
+  handed to the courier**, while it can still be opened and corrected
 - the item card turns amber and names the products it is most easily confused
   with — *ليس: ماتشا زعفراني 150 جرام* — because telling the packer what to rule
   out is far more useful than "check carefully"
@@ -59,10 +65,10 @@ the recording.
 
 **الإعدادات** (on the main screen) holds three switches: read the order aloud
 when a label scans, ask for a confirming re-scan after each order, and video
-quality. All presets record 1080p at 24fps; only the bitrate changes.
-**أعلى وضوح** (6 Mbps, ~45 MB/min) is the default and the one confirmed
-legible on a real label. **متوازنة** (3.5 Mbps, ~26 MB/min) and **موفّرة**
-(720p, ~15 MB/min) trade sharpness for space.
+quality. Four presets, all at 30fps: **فائقة** 1440p/9 Mbps (~67 MB/min),
+**عالية** 1080p/7 Mbps (~52 MB/min, the default), **متوازنة** 1080p/4 Mbps
+(~30 MB/min) and **موفّرة** 720p/2.5 Mbps (~19 MB/min). 1440p is the setting
+to reach for when a label has to be readable in the recording.
 
 After an order is finished, the app asks for a confirming re-scan of the sealed
 box. Scanning the wrong label says which order it actually belongs to and keeps
@@ -100,22 +106,33 @@ nothing to configure.
 
 ## Getting videos into Drive
 
-**أرسل … فيديو إلى Drive** in **الملخص** needs no setup at all. It hands the
-clips to Android's share sheet, where Drive appears as a target and uses the
-Google account the phone is already signed in to. Two taps, nothing to
-configure. Individual clips also get a **مشاركة** button.
+**أرسل … فيديو إلى Drive** in **الملخص** needs no setup. It hands the clips to
+Android's share sheet, where Drive is a target using the Google account the
+phone is already signed in to. Individual clips also get a **مشاركة** button.
 
-There is no way to make this fully automatic without setup: reaching a user's
-Drive silently requires the Drive API, and that requires an OAuth client
-registered to this exact origin. Google does not allow an app to write to your
-Drive just because the browser is signed in. The optional path below does give
-you a named folder and unattended upload, at the cost of a one-time setup.
+The clips are wrapped up *when the summary opens*, not when the button is
+tapped. `navigator.share()` only works while the browser still counts the tap
+as active — roughly a second — and reading tens of megabytes out of storage
+inside the handler blew past that every time, which is what produced
+*"تعذّرت المشاركة"*.
 
-### Optional: unattended upload into a named folder
+### Unattended upload into your own Drive folder
 
-With `NEXT_PUBLIC_GOOGLE_CLIENT_ID` set, a second button appears that creates a
-folder named after the carrier and batch date — `SMSA - 24/08/2026` — and
-uploads every clip plus a CSV manifest without a share sheet.
+Uploading straight into a chosen folder, with no share sheet, requires the
+Drive API — which requires an OAuth client tied to this domain. There is no way
+around that: Google will not let a page write to your Drive merely because
+Chrome is signed in, and a key embedded in the app to fake it would be readable
+by anyone who opened the page, so that is not something to build.
+
+Set both variables in Vercel and the direct path appears:
+
+| Name | Value |
+|---|---|
+| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | `…apps.googleusercontent.com` |
+| `NEXT_PUBLIC_DRIVE_FOLDER_ID` | the folder id, or paste its full URL |
+
+Uploads then land in a dated folder — **26 Aug 2026** — inside the folder you
+named, one per batch, with the CSV manifest alongside.
 
 A group session produces **one** clip covering all its orders, so the summary
 lists it as a single row and offers a single **حفظ** — there is no need to

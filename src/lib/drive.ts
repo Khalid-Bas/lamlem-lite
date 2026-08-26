@@ -19,6 +19,25 @@ export function driveConfigured(): boolean {
   return Boolean(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID);
 }
 
+/**
+ * The Drive folder uploads are filed under, if one was configured.
+ *
+ * Accepts either a bare id or a pasted folder URL, since the share link is
+ * what a person actually has to hand.
+ */
+export function targetFolderId(): string | undefined {
+  const raw = process.env.NEXT_PUBLIC_DRIVE_FOLDER_ID?.trim();
+  if (!raw) return undefined;
+  const fromUrl = raw.match(/\/folders\/([A-Za-z0-9_-]+)/)?.[1];
+  return fromUrl ?? raw;
+}
+
+/** "26 Aug 2026" — the day the batch was filmed. */
+export function dayFolderName(when: Date): string {
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${when.getDate()} ${months[when.getMonth()]} ${when.getFullYear()}`;
+}
+
 interface TokenResponse {
   access_token?: string;
   error?: string;
@@ -97,11 +116,25 @@ async function driveFetch(
   return (await res.json()) as Record<string, unknown>;
 }
 
-/** Creates a folder, reusing one of the same name if this app made it before. */
-export async function ensureFolder(token: string, name: string): Promise<string> {
-  const q = encodeURIComponent(
-    `name='${name.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
-  );
+/**
+ * Creates a folder, reusing one of the same name if this app made it before.
+ *
+ * With `parentId` set the folder is created inside it and only matched there,
+ * so a dated folder in one parent never collides with the same date elsewhere.
+ */
+export async function ensureFolder(
+  token: string,
+  name: string,
+  parentId?: string,
+): Promise<string> {
+  const clauses = [
+    `name='${name.replace(/'/g, "\'")}'`,
+    "mimeType='application/vnd.google-apps.folder'",
+    "trashed=false",
+  ];
+  if (parentId) clauses.push(`'${parentId}' in parents`);
+  const q = encodeURIComponent(clauses.join(" and "));
+
   const found = (await driveFetch(
     token,
     `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=1`,
@@ -119,6 +152,7 @@ export async function ensureFolder(token: string, name: string): Promise<string>
       body: JSON.stringify({
         name,
         mimeType: "application/vnd.google-apps.folder",
+        ...(parentId ? { parents: [parentId] } : {}),
       }),
     },
   )) as { id: string };
