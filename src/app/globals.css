@@ -226,3 +226,9 @@ img{display:block;max-width:100%}
 .mismatch b{color:#FFC9C9;font-size:16px}
 .mismatch span{color:#FFB4B4;font-size:12.5px;line-height:1.7}
 .mismatch ul{margin:0;padding-inline-start:18px;color:#FFD9D9;font-size:13px;line-height:1.9}
+
+/* ─── setup steps ─── */
+.steps{margin:0;padding-inline-start:20px;color:var(--ink-2);font-size:12.5px;line-height:1.9}
+.steps li{margin-bottom:4px}
+.origin{display:block;direction:ltr;text-align:left;background:var(--panel-2);border:1px solid var(--line);
+  border-radius:8px;padding:6px 8px;margin-top:4px;font-size:11.5px;word-break:break-all;color:var(--ink)}

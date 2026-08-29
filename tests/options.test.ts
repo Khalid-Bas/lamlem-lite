@@ -336,3 +336,50 @@ test("order-level and item-level alert checks agree", () => {
   const plain = ord("2", [{ name: "شاي ماتشا 150g", quantity: 1 }]);
   assert.equal(orderHasAlert(plain, flagged), false);
 });
+
+/* ── the alert must fire on exactly the right products ── */
+import { DEFAULT_ALERT_PRODUCTS } from "../src/lib/settings.ts";
+
+test("the default list catches every احتفالية variant", () => {
+  for (const n of [
+    "ماتشا احتفالية فاخرة 50 جرام",
+    "بكج ماتشا احفالية فاخرة 50 جرام",
+    "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها ابيض",
+    "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود",
+    // The catalog spells this one with أ; folding makes them equal.
+    "بكج ماتشا احتفالية فاخرة 50 جرام وأدواتها أسود",
+  ]) {
+    assert.equal(
+      isAlertItem({ name: n, quantity: 1 }, DEFAULT_ALERT_PRODUCTS),
+      true,
+      `should alert on ${n}`,
+    );
+  }
+});
+
+test("the alert never fires on ماتشا زعفراني", () => {
+  for (const n of [
+    "ماتشا زعفراني 150 جرام",
+    "شاي ماتشا 150g",
+    "ملعقة ماتشا",
+    "بكج ماتشا وادواتها أبيض",
+  ]) {
+    assert.equal(
+      isAlertItem({ name: n, quantity: 1 }, DEFAULT_ALERT_PRODUCTS),
+      false,
+      `must NOT alert on ${n}`,
+    );
+  }
+});
+
+test("a stray short keyword can no longer light up everything", () => {
+  // Regression: matching in both directions meant "ماتشا" flagged every
+  // matcha product, زعفراني included.
+  assert.equal(isAlertItem({ name: "ماتشا زعفراني 150 جرام", quantity: 1 }, ["ماتشا"]), true,
+    "a deliberate broad keyword still works forwards");
+  assert.equal(
+    isAlertItem({ name: "ماتشا", quantity: 1 }, ["بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود"]),
+    false,
+    "but a long flagged phrase no longer matches a short product name",
+  );
+});

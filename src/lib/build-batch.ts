@@ -299,12 +299,16 @@ export function orderHasAlert(order: PackOrder, alertNames: string[]): boolean {
 
 export function isAlertItem(item: PackItem, alertNames: string[]): boolean {
   const name = foldArabic(item.name);
-  // Substring, not equality: flagging "ماتشا احتفالية فاخرة 50 جرام" should
-  // also catch "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود", which is the
-  // same product inside a bundle and just as easy to grab by mistake.
+  // One direction only: the item name must contain the flagged phrase, so
+  // "ماتشا احتفالية فاخرة 50 جرام" also catches the bundles built around it.
+  //
+  // The reverse test used to be allowed as well, and it was a trap: any short
+  // entry that happened to sit inside a longer product name matched it, so a
+  // stray "ماتشا" in the list lit up ماتشا زعفراني too. A flagged phrase now
+  // has to be at least as specific as the product it is meant to catch.
   return alertNames.some((n) => {
     const needle = foldArabic(n);
-    return needle.length > 0 && (name.includes(needle) || needle.includes(name));
+    return needle.length >= 3 && name.includes(needle);
   });
 }
 

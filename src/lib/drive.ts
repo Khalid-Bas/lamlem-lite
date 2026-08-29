@@ -15,8 +15,16 @@
 const SCOPE = "https://www.googleapis.com/auth/drive.file";
 const GIS_SRC = "https://accounts.google.com/gsi/client";
 
-export function driveConfigured(): boolean {
-  return Boolean(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID);
+/**
+ * Config comes from the app's own settings first, falling back to build-time
+ * variables. Pasting the id in the app means no redeploy to change it.
+ */
+export function driveConfigured(clientId?: string): boolean {
+  return Boolean(clientId?.trim() || process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID);
+}
+
+function resolveClientId(clientId?: string): string | undefined {
+  return clientId?.trim() || process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || undefined;
 }
 
 /**
@@ -25,11 +33,13 @@ export function driveConfigured(): boolean {
  * Accepts either a bare id or a pasted folder URL, since the share link is
  * what a person actually has to hand.
  */
-export function targetFolderId(): string | undefined {
-  const raw = process.env.NEXT_PUBLIC_DRIVE_FOLDER_ID?.trim();
+export function targetFolderId(configured?: string): string | undefined {
+  const raw = (configured?.trim() || process.env.NEXT_PUBLIC_DRIVE_FOLDER_ID || "").trim();
   if (!raw) return undefined;
+  // Accept a pasted share link as well as a bare id — the link is what a
+  // person actually has to hand.
   const fromUrl = raw.match(/\/folders\/([A-Za-z0-9_-]+)/)?.[1];
-  return fromUrl ?? raw;
+  return fromUrl ?? raw.split(/[?&#]/)[0];
 }
 
 /** "26 Aug 2026" — the day the batch was filmed. */
@@ -53,6 +63,7 @@ interface Gis {
         client_id: string;
         scope: string;
         callback: (r: TokenResponse) => void;
+        error_callback?: (e: { type?: string }) => void;
       }): TokenClient;
     };
   };
@@ -82,8 +93,8 @@ function loadGis(): Promise<Gis> {
 }
 
 /** Opens Google's consent popup and returns a short-lived access token. */
-export async function getAccessToken(): Promise<string> {
-  const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+export async function getAccessToken(configuredClientId?: string): Promise<string> {
+  const clientId = resolveClientId(configuredClientId);
   if (!clientId) throw new Error("لم يُضبط معرّف Google بعد");
 
   const gis = await loadGis();
@@ -94,6 +105,16 @@ export async function getAccessToken(): Promise<string> {
       callback: (res) => {
         if (res.access_token) resolve(res.access_token);
         else reject(new Error(res.error ?? "لم يتم منح الإذن"));
+      },
+      error_callback: (err: { type?: string }) => {
+        // Popup blocked or dismissed: say which, rather than hanging forever.
+        reject(
+          new Error(
+            err?.type === "popup_closed"
+              ? "أُغلقت نافذة Google قبل إتمام الإذن"
+              : "تعذّر فتح نافذة Google — اسمح بالنوافذ المنبثقة لهذا الموقع",
+          ),
+        );
       },
     });
     client.requestAccessToken({ prompt: "" });

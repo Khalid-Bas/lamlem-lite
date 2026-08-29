@@ -38,10 +38,13 @@ pile only works when they hold the same thing, and this is where that goes wrong
 
 ## Guarding against packing the wrong item
 
-Flag the products that are easy to grab by mistake under **الإعدادات → أصناف
-تحتاج انتباهًا** — either tap one from the batch, or type a keyword such as
-*ماتشا احتفالية*, which then matches every variant including the bundle that
-contains it. While any order containing one is being packed:
+Four products are flagged out of the box — the ماتشا احتفالية فاخرة 50 جرام
+line and its bundles. Change the list under **الإعدادات → أصناف تحتاج انتباهًا**:
+tap one from the batch, type a phrase, or restore the vetted set in one tap.
+
+A flagged phrase matches **forwards only** — a product name has to contain it.
+Matching in both directions was a trap: one broad entry like *ماتشا* sat inside
+every matcha product name and lit up ماتشا زعفراني along with the rest. While any order containing one is being packed:
 
 - **quiet piano plays for the whole recording**, with a **♪ صنف انتبه له** chip
   in the header so it reads as a deliberate cue, not a fault. It replaced a
@@ -118,21 +121,20 @@ inside the handler blew past that every time, which is what produced
 
 ### Unattended upload into your own Drive folder
 
-Uploading straight into a chosen folder, with no share sheet, requires the
-Drive API — which requires an OAuth client tied to this domain. There is no way
-around that: Google will not let a page write to your Drive merely because
-Chrome is signed in, and a key embedded in the app to fake it would be readable
-by anyone who opened the page, so that is not something to build.
+Set this up in the app: **الإعدادات → الرفع إلى Drive**. Paste an OAuth client
+id and your folder link (the full share URL is fine — the id is extracted from
+it), then **اختبر الاتصال** proves it end to end by creating today's folder.
+Both are stored on the device, so changing them needs no redeploy. The screen
+shows the exact origin to authorise in Google Cloud.
 
-Set both variables in Vercel and the direct path appears:
+Uploads land in a dated folder — **26 Aug 2026** — inside the folder you named,
+with the CSV manifest alongside.
 
-| Name | Value |
-|---|---|
-| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | `…apps.googleusercontent.com` |
-| `NEXT_PUBLIC_DRIVE_FOLDER_ID` | the folder id, or paste its full URL |
-
-Uploads then land in a dated folder — **26 Aug 2026** — inside the folder you
-named, one per batch, with the CSV manifest alongside.
+Creating that OAuth client in Google Cloud is the one step that cannot be
+removed. Google will not let a page write to your Drive merely because Chrome
+is signed in, and a credential shipped inside the app to fake it would be
+readable by anyone who opened the page — so that is not something to build. The
+share-sheet route above stays available and needs nothing at all.
 
 A group session produces **one** clip covering all its orders, so the summary
 lists it as a single row and offers a single **حفظ** — there is no need to

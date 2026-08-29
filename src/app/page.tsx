@@ -24,7 +24,10 @@ import {
   cueOrderDone, cueGroupDone, cueBatchDone, cueAlertScan,
   speak, stopSpeaking, canSpeak, startAmbient, stopAmbient,
 } from "@/lib/feedback";
-import { loadSettings, saveSettings, QUALITY, DEFAULTS, type Settings as Prefs } from "@/lib/settings";
+import {
+  loadSettings, saveSettings, QUALITY, DEFAULTS, DEFAULT_ALERT_PRODUCTS,
+  type Settings as Prefs,
+} from "@/lib/settings";
 import { useBackGuard } from "@/lib/use-back-guard";
 import type { Batch, PackOrder, PackRecord } from "@/lib/types";
 
@@ -1043,6 +1046,7 @@ export default function App() {
         <Summary
           batch={batch}
           allDone={allDone}
+          prefs={prefs}
           autoWatch={pendingWatch}
           onAutoWatched={() => setPendingWatch(null)}
           onClose={() => setSheet(null)}
@@ -1392,10 +1396,11 @@ function Sheet({
 /* ══════════════ summary ══════════════ */
 
 function Summary({
-  batch, allDone, onClose, onReset, onRelink, autoWatch, onAutoWatched,
+  batch, allDone, prefs, onClose, onReset, onRelink, autoWatch, onAutoWatched,
 }: {
   batch: Batch;
   allDone: boolean;
+  prefs: Prefs;
   autoWatch?: PackRecord[] | null;
   onAutoWatched?: () => void;
   onClose: () => void;
@@ -1557,22 +1562,22 @@ function Summary({
   }
 
   async function uploadAll() {
-    if (!driveConfigured()) {
+    if (!driveConfigured(prefs.driveClientId)) {
       // Explaining the one-time setup beats a silent no-op or a raw error.
       setUpload({
         busy: false,
-        msg: "الرفع إلى Drive غير مفعّل بعد. أضف NEXT_PUBLIC_GOOGLE_CLIENT_ID في إعدادات Vercel ثم أعد النشر (الخطوات في ملف README).",
+        msg: "الرفع المباشر غير مفعّل — افتح الإعدادات ← الرفع إلى Drive وألصق معرّف Google.",
       });
       return;
     }
     setUpload({ busy: true, msg: "جارٍ تسجيل الدخول إلى Google…" });
     try {
-      const token = await getAccessToken();
+      const token = await getAccessToken(prefs.driveClientId);
 
       // With a target folder configured, file everything under a dated folder
       // inside it — "26 Aug 2026" — so a day's work lands in one place.
       // Without one, fall back to a carrier-and-date folder at the Drive root.
-      const parent = targetFolderId();
+      const parent = targetFolderId(prefs.driveFolderId);
       const name = parent
         ? dayFolderName(new Date(batch.createdAt))
         : folderName(
@@ -1651,7 +1656,7 @@ function Summary({
                   ? "لا فيديوهات بعد"
                   : `أرسل ${withVideo} فيديو إلى Drive`}
             </button>
-            {driveConfigured() && (
+            {driveConfigured(prefs.driveClientId) && (
               <button
                 className="btn b-ghost"
                 disabled={upload.busy || withVideo === 0}
@@ -1684,7 +1689,7 @@ function Summary({
 
         {!upload.busy && upload.msg && <div className="flash ok">{upload.msg}</div>}
         {relinkMsg && <div className="flash ok">{relinkMsg}</div>}
-        {!driveConfigured() && (
+        {!driveConfigured(prefs.driveClientId) && (
           <p className="note">
             الرفع إلى Drive غير مفعّل — يحتاج ضبط <code>NEXT_PUBLIC_GOOGLE_CLIENT_ID</code>.
           </p>
@@ -1954,6 +1959,8 @@ function SettingsSheet({
 }) {
   const speech = canSpeak();
   const [q, setQ] = useState("");
+  const [driveTest, setDriveTest] = useState("");
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
   const shown = productNames.filter((n) => !q || n.includes(q));
   const toggleAlert = (name: string) =>
     onChange({
@@ -1984,6 +1991,68 @@ function SettingsSheet({
       />
 
       <div className="blk">
+        <b className="blk-title">الرفع إلى Drive</b>
+        <p className="note">
+          للرفع المباشر بلا مشاركة يدوية، يحتاج Google معرّف تطبيق مرتبط بهذا
+          الموقع — لا توجد طريقة تتجاوز ذلك، فحساب Google في المتصفح وحده لا
+          يمنح أي موقع صلاحية الكتابة في Drive. تُلصق البيانات هنا، فلا حاجة
+          لإعادة نشر التطبيق.
+        </p>
+        <ol className="steps">
+          <li>افتح console.cloud.google.com وأنشئ مشروعًا.</li>
+          <li>فعّل «Google Drive API».</li>
+          <li>OAuth consent screen ← External ← أضف بريدك في Test users.</li>
+          <li>
+            Credentials ← OAuth client ID ← Web application، وأضف هذا العنوان في
+            «Authorised JavaScript origins»:
+            <code className="origin">{origin}</code>
+          </li>
+          <li>انسخ الـ Client ID وألصقه بالأسفل.</li>
+        </ol>
+        <input
+          className="searchbar"
+          value={prefs.driveClientId}
+          onChange={(e) => onChange({ driveClientId: e.target.value.trim() })}
+          placeholder="Client ID …apps.googleusercontent.com"
+          style={{ direction: "ltr", textAlign: "left" }}
+        />
+        <input
+          className="searchbar"
+          value={prefs.driveFolderId}
+          onChange={(e) => onChange({ driveFolderId: e.target.value.trim() })}
+          placeholder="رابط مجلد Drive أو معرّفه"
+          style={{ direction: "ltr", textAlign: "left" }}
+        />
+        <p className="note">
+          {prefs.driveFolderId
+            ? `سيُرفع داخل مجلد باسم اليوم داخل: ${targetFolderId(prefs.driveFolderId)}`
+            : "بدون مجلد، تُنشأ مجلدات باسم الناقل والتاريخ في جذر Drive."}
+        </p>
+        <button
+          className="btn b-line"
+          disabled={!prefs.driveClientId || driveTest === "جارٍ الاختبار…"}
+          onClick={() => {
+            setDriveTest("جارٍ الاختبار…");
+            void (async () => {
+              try {
+                const token = await getAccessToken(prefs.driveClientId);
+                const parent = targetFolderId(prefs.driveFolderId);
+                // Creating the day folder is the same call the real upload
+                // makes, so a pass here means the real thing will work.
+                await ensureFolder(token, dayFolderName(new Date()), parent);
+                setDriveTest("تم الاتصال ✓ — المجلد جاهز");
+              } catch (e) {
+                setDriveTest(e instanceof Error ? `فشل: ${e.message}` : "فشل الاختبار");
+              }
+            })();
+          }}
+        >
+          اختبر الاتصال بـ Drive
+        </button>
+        {driveTest && <p className="note">{driveTest}</p>}
+      </div>
+
+      <div className="blk">
         <b className="blk-title">جودة الفيديو</b>
         <div className="list">
           {(["ultra", "high", "balanced", "saver"] as const).map((q) => (
@@ -2012,6 +2081,15 @@ function SettingsSheet({
           ويظهر تنبيه بالصنف المشابه الذي قد يُخلط معه، ويُطلب تأكيد قبل إنهاء
           الطلب.
         </p>
+        {/* A list saved earlier can carry an over-broad keyword — one stray
+            "ماتشا" flagged زعفراني too — so restoring the vetted set is one tap. */}
+        <button
+          className="btn b-line"
+          onClick={() => onChange({ alertProducts: [...DEFAULT_ALERT_PRODUCTS] })}
+        >
+          استعد القائمة الموصى بها ({DEFAULT_ALERT_PRODUCTS.length})
+        </button>
+
         {/* Already-flagged keywords, including ones typed by hand that are not
             in the current batch. */}
         {prefs.alertProducts.length > 0 && (

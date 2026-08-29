@@ -21,7 +21,30 @@ export interface Settings {
    * confirm tap. For items that are easy to grab by mistake.
    */
   alertProducts: string[];
+  /**
+   * Google OAuth client id for direct Drive upload, pasted in the app rather
+   * than baked in at build time — a build-time variable meant editing Vercel
+   * and redeploying just to try a credential, which is a miserable loop.
+   */
+  driveClientId: string;
+  /** Destination folder: a bare id or a pasted Drive folder URL. */
+  driveFolderId: string;
 }
+
+/**
+ * Products that get the look-twice treatment out of the box.
+ *
+ * These are the ones actually mixed up on the bench. The third entry carries a
+ * spelling that appears in the catalog ("احفالية" without the ت) and would not
+ * be matched by the correctly-spelled phrase, so it is listed separately
+ * rather than silently missed.
+ */
+export const DEFAULT_ALERT_PRODUCTS = [
+  "ماتشا احتفالية فاخرة 50 جرام",
+  "بكج ماتشا احفالية فاخرة 50 جرام",
+  "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها ابيض",
+  "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود",
+];
 
 export const DEFAULTS: Settings = {
   voice: true,
@@ -30,7 +53,9 @@ export const DEFAULTS: Settings = {
   // rate to save space looked worse in practice than the theory predicted, so
   // full quality is the default and size is traded on bitrate alone.
   videoQuality: "high",
-  alertProducts: [],
+  alertProducts: DEFAULT_ALERT_PRODUCTS,
+  driveClientId: "",
+  driveFolderId: "",
 };
 
 const KEY = "lamlem.settings.v1";
@@ -45,6 +70,10 @@ export function loadSettings(): Settings {
       ...DEFAULTS,
       ...parsed,
       videoQuality: migrateQuality(parsed.videoQuality),
+      // An explicitly emptied list is respected; a missing key falls back.
+      alertProducts: Array.isArray(parsed.alertProducts)
+        ? parsed.alertProducts
+        : DEFAULT_ALERT_PRODUCTS,
     };
   } catch {
     return DEFAULTS;
