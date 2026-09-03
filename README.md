@@ -21,6 +21,7 @@ your customer data leaves the device.
 | **Next** | Tap **مسح الباركود** and scan the next label: the current order is saved and the new one starts in one move. Or tap **تم** to just finish. |
 | **Group** | **تجهيز مجموعة طلبات** — scan several labels, pack them together, then re-scan each label to confirm. **The recording runs through the whole session, verification included**, so the confirming scan of every sealed box is on film. All of them are marked done and share one clip. |
 | **Summary** | Per-order time, customer name, video size, **مشاهدة** to preview in place, **حفظ** to download, and **رفع … فيديو إلى Drive** — available at any time, not only once the batch is finished. |
+| **Stocktake** | **جرد الكميات (Excel)** — one workbook, two sheets: what sold, and every carton, cup, sticker and tin that sale consumed. |
 
 Tapping an order in **الطلبات** opens a **read-only preview** — items, photos,
 quantities — and never touches the camera. Recording starts only from the
@@ -36,39 +37,52 @@ red screen if one differs, naming the exact reason: *صنف إضافي: ملعق
 returns to the home screen with nothing recorded. Packing several boxes from one
 pile only works when they hold the same thing, and this is where that goes wrong.
 
-## Guarding against packing the wrong item
+## جرد الكميات — the stocktake
 
-Four products are flagged out of the box — the ماتشا احتفالية فاخرة 50 جرام
-line and its bundles. Change the list under **الإعدادات → أصناف تحتاج انتباهًا**:
-tap one from the batch, type a phrase, or restore the vetted set in one tap.
+**جرد الكميات (Excel)** on the home screen (and in **الملخص**) downloads one
+workbook with two sheets, covering **every order in the batch**, packed or not
+— the question is how much stock to write down, not how far the packing has
+got.
 
-A flagged phrase matches **forwards only** — a product name has to contain it.
-Matching in both directions was a trap: one broad entry like *ماتشا* sat inside
-every matcha product name and lit up ماتشا زعفراني along with the rest. While any order containing one is being packed:
+| Sheet | What it answers |
+|---|---|
+| **المنتجات المباعة** | What was sold: product, chosen variant, SKU, Salla id, units, and how many orders those units are spread over. |
+| **المواد المستهلكة** | What that costs the shelves: every carton, cup, sticker sheet, card and tin actually consumed. |
 
-- **quiet piano plays for the whole recording**, with a **♪ صنف انتبه له** chip
-  in the header so it reads as a deliberate cue, not a fault. It replaced a
-  sustained drone, which blended into warehouse noise and stopped registering
-- scanning the label gives a **longer, distinct buzz** than an ordinary scan
-- after filming, a reminder offers to **play the clip back before the box is
-  handed to the courier**, while it can still be opened and corrected
-- the item card turns amber and names the products it is most easily confused
-  with — *ليس: ماتشا زعفراني 150 جرام* — because telling the packer what to rule
-  out is far more useful than "check carefully"
-- the order cannot be finished until the item is explicitly ticked
+The second sheet is the point. Selling one **بكج الجمعات** consumes a large
+carton, ten printed cups, four sticker sheets, a card, a matcha tin and a litre
+of oat drink — none of which is called "بكج الجمعات" anywhere in the warehouse.
+Counting sold products alone leaves exactly the packaging that runs out
+unnoticed.
 
-The look-alikes are worked out from the batch itself, by word overlap: it pairs
-the black and white matcha bundles, the Ethiopian and Colombian coffee cartons,
-and a standalone product with the bundle that contains it — while ignoring weak
-pairs that merely share one word, like a matcha tea and a matcha spoon.
+The recipes come from your own sheet (**كمية المخزون المستهلكة من كل منتج**),
+baked into the app so the button works on a fresh phone with nothing to set up.
+When a recipe changes, upload the new sheet under **الإعدادات → ملف الجرد**; it
+is kept on the device and **العودة إلى الجدول المضمَّن** puts the built-in one
+back. To change the built-in copy instead:
+
+```bash
+node --experimental-strip-types scripts/make-bom.mjs "<the .xlsx>"
+```
+
+A row is found by SKU first — the sheet lists «استكر شيت من تصميم قوت» three
+times for three printings and only the SKU tells them apart — then by exact
+name, then by the variant rows whose names carry the option inline
+(«بكج الجمعات - اسود/مشروب اوتلي»), scored against the option on the order.
+Where the sheet splits a product by something the order never states (the
+carton colour) both rows consume the same things, so nothing is flagged.
+
+Anything the sheet cannot cost is **named on screen and marked in the
+ملاحظة column** rather than silently dropped — a missing product, or one whose
+row has no components filled in yet.
 
 Scanning is **only** active while the scanner is on screen. During packing the
 detector is off, so a label lying on the bench cannot end the order or restart
 the recording.
 
-**الإعدادات** (on the main screen) holds three switches: read the order aloud
-when a label scans, ask for a confirming re-scan after each order, and video
-quality. Four presets, all at 30fps: **فائقة** 1440p/9 Mbps (~67 MB/min),
+**الإعدادات** (on the main screen) holds: read the order aloud when a label
+scans, ask for a confirming re-scan after each order, the stocktake sheet, the
+Drive credentials, and video quality. Four presets, all at 30fps: **فائقة** 1440p/9 Mbps (~67 MB/min),
 **عالية** 1080p/7 Mbps (~52 MB/min, the default), **متوازنة** 1080p/4 Mbps
 (~30 MB/min) and **موفّرة** 720p/2.5 Mbps (~19 MB/min). 1440p is the setting
 to reach for when a label has to be readable in the recording.
@@ -208,6 +222,12 @@ Driven through the real UI against your real files (`Prep Orders.pdf`,
 - group session: collect 3 → record → stop → verify 3 → all marked done,
   counter 2/30 → 5/30, each row labelled *ضمن مجموعة*
 - summary shows customer names; timings and IndexedDB persistence survive reload
+- **جرد الكميات** against the same batch: 8 sold lines / 33 units over 30 orders,
+  exploded into 15 components — 27 small cartons, 76 new-design cups, 37 sticker
+  sheets, 31 free mugs cards, 29 matcha tins — each figure checked by hand
+  against your sheet. The workbook was written, read back and confirmed
+  right-to-left in both sheets. Uploading a replacement sheet in **الإعدادات**
+  reparsed to the same 51 products / 37 components.
 
 Also verified by substituting a synthetic camera (an animated canvas fed
 through `getUserMedia`), which exercises the real video pipeline:

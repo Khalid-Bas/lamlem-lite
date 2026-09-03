@@ -199,7 +199,7 @@ test("the carrier tag survives a trimmed long name", () => {
 });
 
 /* ── explaining a group mismatch ── */
-import { explainDifference, confusableNames } from "../src/lib/build-batch.ts";
+import { explainDifference } from "../src/lib/build-batch.ts";
 
 test("names the extra item that makes an order different", () => {
   const ref = ord("1", [{ name: "ماتشا زعفراني 150 جرام", quantity: 1 }]);
@@ -223,36 +223,6 @@ test("names a missing item and a wrong quantity", () => {
   assert.ok(reasons.some((r) => r.includes("الكمية 3 بدل 1")), reasons.join(" | "));
 });
 
-/* ── look-alike products ── */
-test("flags the product most easily confused with a watched one", () => {
-  const all = [
-    "ماتشا احتفالية فاخرة 50 جرام",
-    "ماتشا زعفراني 150 جرام",
-    "استكر شيت من تصميم قوت",
-    "كرتون قهوة أثيوبي",
-  ];
-  const near = confusableNames("ماتشا احتفالية فاخرة 50 جرام", all);
-  assert.ok(near.includes("ماتشا زعفراني 150 جرام"), near.join(" | "));
-  assert.ok(!near.includes("كرتون قهوة أثيوبي"));
-});
-
-test("an unmistakable product has no look-alikes", () => {
-  const all = ["كرتون قهوة أثيوبي", "استكر شيت من تصميم قوت"];
-  assert.deepEqual(confusableNames("كرتون قهوة أثيوبي", all), []);
-});
-
-test("one shared word is not enough to call two products confusable", () => {
-  // Regression: "شاي ماتشا 150g" and "ملعقة ماتشا" share only "ماتشا" — a tea
-  // and a spoon are not mistaken for each other.
-  const all = ["شاي ماتشا 150g", "ملعقة ماتشا"];
-  assert.deepEqual(confusableNames("شاي ماتشا 150g", all), []);
-});
-
-test("pairs the two coffee cartons, which differ only by origin", () => {
-  const all = ["كرتون قهوة أثيوبي", "كرتون قهوة كولومبي", "استكر شيت"];
-  assert.deepEqual(confusableNames("كرتون قهوة أثيوبي", all), ["كرتون قهوة كولومبي"]);
-});
-
 /* ── drive folder targeting ── */
 import { dayFolderName } from "../src/lib/drive.ts";
 
@@ -268,118 +238,4 @@ test("derives the carrier tag from the name when the id is missing", () => {
   assert.equal(carrierCode([{ carrierName: "سمسا" }]), "SMSA");
   assert.equal(carrierCode([{ carrierId: "smsa", carrierName: "سمسا" }]), "SMSA");
   assert.equal(carrierCode([{ carrierName: "لا أحد" }]), "");
-});
-
-/* ── flagged products match inside bundles ── */
-import { isAlertItem, orderHasAlert } from "../src/lib/build-batch.ts";
-
-test("a flagged product is caught inside a bundle name too", () => {
-  const flagged = ["ماتشا احتفالية فاخرة 50 جرام"];
-  assert.equal(
-    isAlertItem({ name: "ماتشا احتفالية فاخرة 50 جرام", quantity: 1 }, flagged),
-    true,
-  );
-  // The same product inside a bundle is just as easy to grab by mistake.
-  assert.equal(
-    isAlertItem(
-      { name: "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود", quantity: 1 },
-      flagged,
-    ),
-    true,
-  );
-  assert.equal(
-    isAlertItem({ name: "ماتشا زعفراني 150 جرام", quantity: 1 }, flagged),
-    false,
-  );
-});
-
-test("flagging a short keyword covers every variant of it", () => {
-  const flagged = ["ماتشا احتفالية"];
-  assert.equal(isAlertItem({ name: "ماتشا احتفالية فاخرة 50 جرام", quantity: 1 }, flagged), true);
-  assert.equal(isAlertItem({ name: "شاي ماتشا 150g", quantity: 1 }, flagged), false);
-});
-
-/* ── an order that differs only by an extra item is caught ── */
-test("six orders with one extra item flags exactly that order", () => {
-  const same = ["1", "2", "3", "4", "5"].map((n) =>
-    ord(n, [{ name: "ماتشا زعفراني 150 جرام", quantity: 1 }]),
-  );
-  const odd = ord("6", [
-    { name: "ماتشا زعفراني 150 جرام", quantity: 1 },
-    { name: "ملعقة ماتشا", quantity: 1 },
-  ]);
-  const { outliers } = findContentOutliers([...same, odd]);
-  assert.deepEqual(outliers.map((o) => o.orderNumber), ["6"]);
-});
-
-test("a wholly different product among matching orders is caught", () => {
-  const same = ["1", "2", "3", "4", "5"].map((n) =>
-    ord(n, [{ name: "ماتشا زعفراني 150 جرام", quantity: 1 }]),
-  );
-  const odd = ord("6", [{ name: "ماتشا احتفالية فاخرة 50 جرام", quantity: 1 }]);
-  const { outliers } = findContentOutliers([...same, odd]);
-  assert.deepEqual(outliers.map((o) => o.orderNumber), ["6"]);
-  const reasons = explainDifference(odd, same[0]);
-  assert.ok(reasons.length > 0, "the difference is explained, not just flagged");
-});
-
-test("order-level and item-level alert checks agree", () => {
-  // Regression: orderHasAlert matched exactly while isAlertItem matched by
-  // substring, so a flagged bundle showed the warning but played no music.
-  const flagged = ["ماتشا احتفالية"];
-  const order = ord("1", [
-    { name: "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود", quantity: 1 },
-  ]);
-  assert.equal(orderHasAlert(order, flagged), true);
-  assert.equal(isAlertItem(order.items[0], flagged), true);
-
-  const plain = ord("2", [{ name: "شاي ماتشا 150g", quantity: 1 }]);
-  assert.equal(orderHasAlert(plain, flagged), false);
-});
-
-/* ── the alert must fire on exactly the right products ── */
-import { DEFAULT_ALERT_PRODUCTS } from "../src/lib/settings.ts";
-
-test("the default list catches every احتفالية variant", () => {
-  for (const n of [
-    "ماتشا احتفالية فاخرة 50 جرام",
-    "بكج ماتشا احفالية فاخرة 50 جرام",
-    "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها ابيض",
-    "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود",
-    // The catalog spells this one with أ; folding makes them equal.
-    "بكج ماتشا احتفالية فاخرة 50 جرام وأدواتها أسود",
-  ]) {
-    assert.equal(
-      isAlertItem({ name: n, quantity: 1 }, DEFAULT_ALERT_PRODUCTS),
-      true,
-      `should alert on ${n}`,
-    );
-  }
-});
-
-test("the alert never fires on ماتشا زعفراني", () => {
-  for (const n of [
-    "ماتشا زعفراني 150 جرام",
-    "شاي ماتشا 150g",
-    "ملعقة ماتشا",
-    "بكج ماتشا وادواتها أبيض",
-  ]) {
-    assert.equal(
-      isAlertItem({ name: n, quantity: 1 }, DEFAULT_ALERT_PRODUCTS),
-      false,
-      `must NOT alert on ${n}`,
-    );
-  }
-});
-
-test("a stray short keyword can no longer light up everything", () => {
-  // Regression: matching in both directions meant "ماتشا" flagged every
-  // matcha product, زعفراني included.
-  assert.equal(isAlertItem({ name: "ماتشا زعفراني 150 جرام", quantity: 1 }, ["ماتشا"]), true,
-    "a deliberate broad keyword still works forwards");
-  assert.equal(
-    isAlertItem({ name: "ماتشا", quantity: 1 }, ["بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود"]),
-    false,
-    "but a long flagged phrase no longer matches a short product name",
-  );
 });

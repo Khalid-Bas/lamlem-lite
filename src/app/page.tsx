@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Camera, canScan } from "@/lib/camera";
 import {
   buildBatch, linkCatalog, describeOrder, findContentOutliers, explainDifference,
-  orderHasAlert, isAlertItem, confusableNames,
   type BuildProgress, type BuildStats,
 } from "@/lib/build-batch";
 import { readCatalog } from "@/lib/catalog-load";
@@ -21,13 +20,16 @@ import {
 import { carrierCode } from "@/lib/carriers";
 import {
   primeAudio, cueScanOk, cueScanFail, cueNeutral,
-  cueOrderDone, cueGroupDone, cueBatchDone, cueAlertScan,
-  speak, stopSpeaking, canSpeak, startAmbient, stopAmbient,
+  cueOrderDone, cueGroupDone, cueBatchDone, speak, stopSpeaking, canSpeak,
 } from "@/lib/feedback";
 import {
-  loadSettings, saveSettings, QUALITY, DEFAULTS, DEFAULT_ALERT_PRODUCTS,
-  type Settings as Prefs,
+  loadSettings, saveSettings, QUALITY, DEFAULTS, type Settings as Prefs,
 } from "@/lib/settings";
+import { downloadInventory } from "@/lib/inventory/export";
+import {
+  activeBom, loadStoredBom, saveBom, clearBom, BUILT_IN_BOM, type StoredBom,
+} from "@/lib/inventory/bom-store";
+import { readBomFile } from "@/lib/inventory/bom";
 import { useBackGuard } from "@/lib/use-back-guard";
 import type { Batch, PackOrder, PackRecord } from "@/lib/types";
 
@@ -37,6 +39,7 @@ type Flash = { kind: "bad" | "warn" | "ok"; text: string } | null;
 
 export default function App() {
   const [batch, setBatch] = useState<Batch | null>(null);
+  const [invMsg, setInvMsg] = useState("");
   const [mode, setMode] = useState<Mode>("setup");
   const [current, setCurrent] = useState<PackOrder | null>(null);
   const [startedAt, setStartedAt] = useState(0);
@@ -53,16 +56,6 @@ export default function App() {
   const [preview, setPreview] = useState<PackOrder | null>(null);
   /** Bumped once the camera exists, so the scanning effect can re-run. */
   const [camReady, setCamReady] = useState(0);
-  /** Look-twice items the packer has ticked for the order in progress. */
-  const [confirmedAlerts, setConfirmedAlerts] = useState<string[]>([]);
-  /** Whether the look-twice tone is running, so the header can explain it. */
-  const [ambientOn, setAmbientOn] = useState(false);
-  /** Clip the summary should open as soon as it mounts. */
-  const [pendingWatch, setPendingWatch] = useState<PackRecord[] | null>(null);
-  /** Reminder shown after a flagged order is filmed, before it is handed over. */
-  const [reviewPrompt, setReviewPrompt] = useState<
-    { orderNumber: string; records: PackRecord[] } | null
-  >(null);
   /** A scanned order that does not match the rest of the group being built. */
   const [groupWarn, setGroupWarn] = useState<
     { orderNumber: string; reasons: string[]; total: number; addedNumber?: string } | null
@@ -182,6 +175,28 @@ export default function App() {
     });
   }, []);
 
+  /**
+   * Writes the stocktake for the whole uploaded batch, packed or not.
+   *
+   * The question it answers — how much stock to write down — is about what was
+   * sold, not about how far the packing has got, so it deliberately covers
+   * every order in the batch.
+   */
+  const exportInventory = useCallback(async () => {
+    if (!batch) return;
+    setInvMsg("جارٍ تجهيز الملف…");
+    try {
+      const out = await downloadInventory(batch.orders, activeBom());
+      setInvMsg(
+        out.unresolved.length
+          ? `تم تنزيل «${out.fileName}» — المنتجات: ${out.soldCount} · المواد: ${out.componentCount}. بلا مكوّنات في ملف الجرد: ${out.unresolved.join("، ")}`
+          : `تم تنزيل «${out.fileName}» — المنتجات: ${out.soldCount} · المواد: ${out.componentCount}.`,
+      );
+    } catch (e) {
+      setInvMsg(e instanceof Error ? `تعذّر إنشاء الجرد: ${e.message}` : "تعذّر إنشاء الجرد");
+    }
+  }, [batch]);
+
   const aliases = useMemo(
     () =>
       (batch?.orders ?? []).flatMap((o) =>
@@ -206,15 +221,6 @@ export default function App() {
     [batch],
   );
 
-  // Flagged items in the order being packed that have not been ticked yet.
-  const pendingAlerts = useMemo(() => {
-    if (!current) return [];
-    return current.items
-      .filter((it) => isAlertItem(it, prefs.alertProducts))
-      .map((it) => it.name)
-      .filter((n) => !confirmedAlerts.includes(n));
-  }, [current, prefs.alertProducts, confirmedAlerts]);
-
   /* ── camera: opened on demand, kept alive while a recording is running ── */
   const ensureCamera = useCallback(async (): Promise<Camera | null> => {
     if (!videoRef.current) return null;
@@ -237,7 +243,7 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => () => { camRef.current?.stop(); stopAmbient(); }, []);
+  useEffect(() => () => camRef.current?.stop(), []);
 
   useEffect(() => {
     // group-verify is included: the recording is still running through it.
@@ -255,9 +261,6 @@ export default function App() {
     const durationMs = Date.now() - startedAtRef.current;
     const blob = await cam.stopRecording();
     setRecording(false);
-    stopAmbient();
-    setAmbientOn(false);
-    setConfirmedAlerts([]);
     if (blob) await saveVideo(order.id, blob);
 
     const base = batchRef.current;
@@ -277,14 +280,6 @@ export default function App() {
       if (next.records.length >= next.orders.length) cueBatchDone();
       else cueOrderDone();
 
-      // A flagged order is exactly the one worth watching back before the box
-      // leaves the bench, while it can still be opened and corrected.
-      if (blob && orderHasAlert(order, prefsRef.current.alertProducts)) {
-        setReviewPrompt({
-          orderNumber: order.orderNumber,
-          records: next.records.filter((r) => r.orderId === order.id),
-        });
-      }
     }
     setCurrent(null);
   }, []);
@@ -304,11 +299,6 @@ export default function App() {
 
     // A flagged item keeps a quiet tone running for the whole order, so the
     // packer is aware they are on one without having to re-read the screen.
-    setConfirmedAlerts([]);
-    const flagged = orderHasAlert(order, prefsRef.current.alertProducts);
-    if (flagged) startAmbient();
-    else stopAmbient();
-    setAmbientOn(flagged);
   }, []);
 
   /* ── every scan lands here ── */
@@ -389,10 +379,7 @@ export default function App() {
         return;
       }
       if (active) await finishCurrent();
-      // A flagged order gets its own long buzz, so the packer feels the
-      // difference before looking at the screen.
-      if (orderHasAlert(order, prefsRef.current.alertProducts)) cueAlertScan();
-      else cueScanOk();
+      cueScanOk();
       setScanFor(null);
       beginOrder(order);
       // Announce what goes in the box, so the packer need not look up.
@@ -509,13 +496,6 @@ export default function App() {
     cam?.startRecording();
     setRecording(Boolean(cam?.isRecording));
 
-    const flagged = groupIdsRef.current
-      .map((id) => batchRef.current?.orders.find((o) => o.id === id))
-      .filter((o): o is PackOrder => Boolean(o))
-      .some((o) => orderHasAlert(o, prefsRef.current.alertProducts));
-    if (flagged) startAmbient();
-    else stopAmbient();
-    setAmbientOn(flagged);
   }, [closeScanner, ensureCamera]);
 
   /**
@@ -564,8 +544,6 @@ export default function App() {
       // alike; it is stopped here, once every box has been checked.
       const blob = await camRef.current?.stopRecording();
       setRecording(false);
-      stopAmbient();
-      setAmbientOn(false);
       if (blob) await saveVideo(groupIdRef.current, blob);
       const bytes = blob?.size ?? 0;
       const per = ids.length ? (Date.now() - startedAtRef.current) / ids.length : 0;
@@ -635,8 +613,6 @@ export default function App() {
             ) : (
               <span className="chip">بلا فيديو</span>
             )}
-            {/* Names the hum, so it reads as a deliberate cue not a fault. */}
-            {ambientOn && <span className="chip alertchip">♪ صنف انتبه له</span>}
           </>
         )}
         {/* Available during packing too: opening the list only previews now, so
@@ -679,6 +655,10 @@ export default function App() {
                 عرض الملخّص والفيديوهات ({done})
               </button>
             )}
+            <button className="btn b-ghost" onClick={() => void exportInventory()}>
+              جرد الكميات (Excel)
+            </button>
+            {invMsg && <p className="note">{invMsg}</p>}
             <button className="btn b-ghost" onClick={() => setSheet("settings")}>
               الإعدادات
             </button>
@@ -687,18 +667,9 @@ export default function App() {
 
         {mode === "packing" && current && (
           <>
-            <OrderCard
-              order={current}
-              alertNames={prefs.alertProducts}
-              catalogNames={catalogNames}
-              confirmed={confirmedAlerts}
-              onConfirm={(n) =>
-                setConfirmedAlerts((c) => (c.includes(n) ? c.filter((x) => x !== n) : [...c, n]))
-              }
-            />
+            <OrderCard order={current} />
             <button
               className="btn b-go"
-              disabled={pendingAlerts.length > 0}
               onClick={() =>
                 void (async () => {
                   const packed = currentRef.current;
@@ -709,9 +680,7 @@ export default function App() {
                 })()
               }
             >
-              {pendingAlerts.length > 0
-                ? `أكّد ${pendingAlerts.length} صنف للمتابعة`
-                : "تم — أنهِ هذا الطلب"}
+              تم — أنهِ هذا الطلب
             </button>
           </>
         )}
@@ -968,8 +937,6 @@ export default function App() {
           packed={packedIds.has(preview.id)}
           record={batch?.records.find((r) => r.orderId === preview.id)}
           busyWith={current}
-          alertNames={prefs.alertProducts}
-          catalogNames={catalogNames}
           onClose={() => setPreview(null)}
           onStart={() => {
             const o = preview;
@@ -999,44 +966,9 @@ export default function App() {
         />
       )}
 
-      {reviewPrompt && (
-        <Sheet
-          title={`راجع الفيديو — #${reviewPrompt.orderNumber}`}
-          onClose={() => setReviewPrompt(null)}
-          footer={
-            <>
-              <button
-                className="btn b-go"
-                onClick={() => {
-                  const rs = reviewPrompt.records;
-                  setReviewPrompt(null);
-                  setSheet("summary");
-                  // Land straight on the clip rather than making them hunt.
-                  setTimeout(() => setPendingWatch(rs), 250);
-                }}
-              >
-                شاهد الفيديو الآن
-              </button>
-              <button className="btn b-line" onClick={() => setReviewPrompt(null)}>
-                تخطَّ
-              </button>
-            </>
-          }
-        >
-          <div className="mismatch" style={{ background: "#2A2113", borderColor: "var(--warn)" }}>
-            <b style={{ color: "#F2D18B" }}>هذا الطلب يحتوي صنفًا تحتاج الانتباه له</b>
-            <span style={{ color: "#F2D18B" }}>
-              راجع الفيديو وتأكد من الصنف قبل تسليم الطرد لشركة الشحن — بعد
-              التسليم لا يمكن فتح الصندوق وتصحيحه.
-            </span>
-          </div>
-        </Sheet>
-      )}
-
       {sheet === "settings" && (
         <SettingsSheet
           prefs={prefs}
-          productNames={catalogNames}
           onChange={updatePrefs}
           onClose={() => setSheet(null)}
         />
@@ -1047,8 +979,6 @@ export default function App() {
           batch={batch}
           allDone={allDone}
           prefs={prefs}
-          autoWatch={pendingWatch}
-          onAutoWatched={() => setPendingWatch(null)}
           onClose={() => setSheet(null)}
           onReset={async () => {
             await clearAll();
@@ -1152,16 +1082,7 @@ function GroupList({ orders, verified }: { orders: PackOrder[]; verified?: strin
 
 /* ══════════════ order card ══════════════ */
 
-function OrderCard({
-  order, compact, alertNames = [], catalogNames = [], confirmed = [], onConfirm,
-}: {
-  order: PackOrder;
-  compact?: boolean;
-  alertNames?: string[];
-  catalogNames?: string[];
-  confirmed?: string[];
-  onConfirm?: (name: string) => void;
-}) {
+function OrderCard({ order, compact }: { order: PackOrder; compact?: boolean }) {
   const single = order.items.length === 1 && !compact;
   return (
     <>
@@ -1182,11 +1103,8 @@ function OrderCard({
 
       <div className="items" data-n={single ? 1 : 2}>
         {order.items.map((it, i) => {
-          const flagged = isAlertItem(it, alertNames);
-          const ticked = confirmed.includes(it.name);
-          const lookalikes = flagged ? confusableNames(it.name, catalogNames) : [];
           return (
-            <div className={`item ${flagged ? "alert" : ""}`} key={`${it.name}-${i}`}>
+            <div className="item" key={`${it.name}-${i}`}>
               <div className="pic">
                 {it.imageUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -1215,24 +1133,6 @@ function OrderCard({
                 <div className="qty">{it.quantity}</div>
               </div>
 
-              {/* Naming the look-alike is the useful part: it tells the packer
-                  exactly what to rule out, not just to be careful. */}
-              {lookalikes.length > 0 && (
-                <div className="notthis">
-                  ليس: {lookalikes.join(" · ")}
-                </div>
-              )}
-
-              {flagged && onConfirm && (
-                <button
-                  className={`confirmbar ${ticked ? "on" : ""}`}
-                  onClick={() => onConfirm(it.name)}
-                  aria-pressed={ticked}
-                >
-                  <span className="box">{ticked ? "✓" : ""}</span>
-                  {ticked ? "تم التأكيد" : "أكّد أنك وضعت هذا الصنف بالضبط"}
-                </button>
-              )}
             </div>
           );
         })}
@@ -1252,7 +1152,6 @@ function OrderCard({
  */
 function OrderPreview({
   order, index, count, onStep, packed, record, busyWith, onClose, onStart,
-  alertNames = [], catalogNames = [],
 }: {
   order: PackOrder;
   index: number;
@@ -1263,8 +1162,6 @@ function OrderPreview({
   busyWith: PackOrder | null;
   onClose: () => void;
   onStart: () => void;
-  alertNames?: string[];
-  catalogNames?: string[];
 }) {
   // Horizontal swipe moves between orders, so a whole batch can be flicked
   // through without closing and reopening the list each time.
@@ -1346,7 +1243,7 @@ function OrderPreview({
           يجري الآن تجهيز #{busyWith!.orderNumber} — سيُحفظ قبل بدء هذا الطلب.
         </div>
       )}
-      <OrderCard order={order} alertNames={alertNames} catalogNames={catalogNames} />
+      <OrderCard order={order} />
     </Sheet>
   );
 }
@@ -1396,13 +1293,11 @@ function Sheet({
 /* ══════════════ summary ══════════════ */
 
 function Summary({
-  batch, allDone, prefs, onClose, onReset, onRelink, autoWatch, onAutoWatched,
+  batch, allDone, prefs, onClose, onReset, onRelink,
 }: {
   batch: Batch;
   allDone: boolean;
   prefs: Prefs;
-  autoWatch?: PackRecord[] | null;
-  onAutoWatched?: () => void;
   onClose: () => void;
   onReset: () => Promise<void>;
   onRelink: (f: File) => Promise<string>;
@@ -1412,6 +1307,7 @@ function Summary({
   const [upload, setUpload] = useState<{ busy: boolean; msg: string }>({ busy: false, msg: "" });
   const relinkRef = useRef<HTMLInputElement>(null);
   const [relinkMsg, setRelinkMsg] = useState("");
+  const [invMsg, setInvMsg] = useState("");
   // Probed once with a dummy file: the API is all-or-nothing per device.
   const shareSupported = useMemo(
     () => canShareFiles([new File([new Blob(["x"])], "a.webm", { type: "video/webm" })]),
@@ -1422,13 +1318,6 @@ function Summary({
     void usage().then(setStore);
   }, []);
 
-  // Opened straight from the "review this clip" reminder.
-  useEffect(() => {
-    if (!autoWatch?.length) return;
-    void watch(autoWatch);
-    onAutoWatched?.();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoWatch]);
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview.url); }, [preview]);
 
   const byId = new Map(batch.orders.map((o) => [o.id, o]));
@@ -1645,6 +1534,29 @@ function Summary({
             {/* Always offered, not gated on the batch being finished: a long
                 day is often uploaded in stages, and already-packed orders are
                 the ones at risk if the phone fills up or is lost. */}
+            {/* The stocktake covers every order that was uploaded, so it is
+                offered here as well as on the home screen — this sheet is
+                where the batch gets wrapped up. */}
+            <button
+              className="btn b-ghost"
+              onClick={() => {
+                setInvMsg("جارٍ تجهيز الملف…");
+                void downloadInventory(batch.orders, activeBom())
+                  .then((out) =>
+                    setInvMsg(
+                      out.unresolved.length
+                        ? `تم تنزيل «${out.fileName}» — المنتجات: ${out.soldCount} · المواد: ${out.componentCount}. بلا مكوّنات في ملف الجرد: ${out.unresolved.join("، ")}`
+                        : `تم تنزيل «${out.fileName}» — المنتجات: ${out.soldCount} · المواد: ${out.componentCount}.`,
+                    ),
+                  )
+                  .catch((e: unknown) =>
+                    setInvMsg(e instanceof Error ? `تعذّر إنشاء الجرد: ${e.message}` : "تعذّر إنشاء الجرد"),
+                  );
+              }}
+            >
+              جرد الكميات (Excel)
+            </button>
+            {invMsg && <p className="note">{invMsg}</p>}
             <button
               className="btn b-drive"
               disabled={upload.busy || withVideo === 0}
@@ -1950,45 +1862,94 @@ function Toggle({
 }
 
 function SettingsSheet({
-  prefs, productNames, onChange, onClose,
+  prefs, onChange, onClose,
 }: {
   prefs: Prefs;
-  productNames: string[];
   onChange: (p: Partial<Prefs>) => void;
   onClose: () => void;
 }) {
   const speech = canSpeak();
-  const [q, setQ] = useState("");
   const [driveTest, setDriveTest] = useState("");
+  const [bom, setBom] = useState<StoredBom | null>(null);
+  const [bomMsg, setBomMsg] = useState("");
+  const bomRef = useRef<HTMLInputElement>(null);
   const origin = typeof window === "undefined" ? "" : window.location.origin;
-  const shown = productNames.filter((n) => !q || n.includes(q));
-  const toggleAlert = (name: string) =>
-    onChange({
-      alertProducts: prefs.alertProducts.includes(name)
-        ? prefs.alertProducts.filter((n) => n !== name)
-        : [...prefs.alertProducts, name],
-    });
+
+  // Read after mount: localStorage on the first render would not match the
+  // server-rendered markup.
+  useEffect(() => setBom(loadStoredBom()), []);
+
   return (
     <Sheet title="الإعدادات" onClose={onClose}>
-      <Toggle
-        label="نطق محتويات الطلب"
-        note="يقرأ الأصناف بصوت عند مسح الباركود، لتتجنّب الخطأ بلا نظر للشاشة."
-        on={prefs.voice}
-        disabled={!speech}
-        disabledNote="هذا الجهاز لا يدعم النطق."
-        onToggle={() => {
-          const next = !prefs.voice;
-          onChange({ voice: next });
-          if (next) speak("تم تشغيل النطق");
-          else stopSpeaking();
-        }}
-      />
-      <Toggle
-        label="تحقق بعد كل طلب"
-        note="بعد إنهاء الطلب، يطلب مسح البوليصة مرة أخرى للتأكد من الصندوق."
-        on={prefs.verifyAfterPack}
-        onToggle={() => onChange({ verifyAfterPack: !prefs.verifyAfterPack })}
-      />
+      <div className="blk">
+        <b className="blk-title">أثناء التعبئة</b>
+        <div className="list">
+          <Toggle
+            label="اقرأ محتويات الطلب بصوت"
+            note="عند مسح البوليصة، يُقرأ ما يوضع في الصندوق."
+            disabled={!speech}
+            disabledNote="لا يدعم هذا الجهاز النطق."
+            on={prefs.voice && speech}
+            onToggle={() => onChange({ voice: !prefs.voice })}
+          />
+          <Toggle
+            label="تأكيد بمسح البوليصة بعد التعبئة"
+            note="بعد إنهاء الطلب، امسح البوليصة مرة أخرى للتحقق."
+            on={prefs.verifyAfterPack}
+            onToggle={() => onChange({ verifyAfterPack: !prefs.verifyAfterPack })}
+          />
+        </div>
+      </div>
+
+      <div className="blk">
+        <b className="blk-title">ملف الجرد — مكوّنات كل منتج</b>
+        <p className="note">
+          يُحسب «جرد الكميات» من جدول يقول ماذا يُستهلك فعليًا عند بيع كل منتج
+          أو بكج. الجدول المرفق مضمَّن في التطبيق، فلا حاجة لرفع شيء — ارفع
+          نسخة محدّثة فقط عند تغيّر مكوّنات أي بكج.
+        </p>
+        <p className="note">
+          {bom
+            ? `المستخدم الآن: «${bom.fileName}» — المنتجات: ${bom.bom.rows.length} · المواد: ${bom.bom.components.length}.`
+            : `المستخدم الآن: الجدول المضمَّن — المنتجات: ${BUILT_IN_BOM.rows.length} · المواد: ${BUILT_IN_BOM.components.length}.`}
+        </p>
+        <input
+          ref={bomRef}
+          type="file"
+          accept=".xlsx,.xls,.csv"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (!f) return;
+            setBomMsg("جارٍ القراءة…");
+            void readBomFile(f)
+              .then((parsed) => {
+                setBom(saveBom(parsed, f.name));
+                setBomMsg(`تم — المنتجات: ${parsed.rows.length} · المواد: ${parsed.components.length}.`);
+              })
+              .catch((err: unknown) =>
+                setBomMsg(err instanceof Error ? `تعذّرت القراءة: ${err.message}` : "تعذّرت القراءة"),
+              );
+          }}
+        />
+        <button className="btn b-line" onClick={() => bomRef.current?.click()}>
+          رفع ملف جرد محدَّث
+        </button>
+        {bom && (
+          <button
+            className="btn b-ghost"
+            onClick={() => {
+              clearBom();
+              setBom(null);
+              setBomMsg("عاد التطبيق إلى الجدول المضمَّن.");
+            }}
+          >
+            العودة إلى الجدول المضمَّن
+          </button>
+        )}
+        {bomMsg && <p className="note">{bomMsg}</p>}
+      </div>
 
       <div className="blk">
         <b className="blk-title">الرفع إلى Drive</b>
@@ -2072,79 +2033,6 @@ function SettingsSheet({
         <p className="note">
           تُطبَّق الجودة على التسجيل التالي — لن يتأثر تسجيل جارٍ الآن.
         </p>
-      </div>
-
-      <div className="blk">
-        <b className="blk-title">أصناف تحتاج انتباهًا</b>
-        <p className="note">
-          عند تعبئة أي طلب يحتوي أحد هذه الأصناف: تعمل نغمة هادئة طوال التسجيل،
-          ويظهر تنبيه بالصنف المشابه الذي قد يُخلط معه، ويُطلب تأكيد قبل إنهاء
-          الطلب.
-        </p>
-        {/* A list saved earlier can carry an over-broad keyword — one stray
-            "ماتشا" flagged زعفراني too — so restoring the vetted set is one tap. */}
-        <button
-          className="btn b-line"
-          onClick={() => onChange({ alertProducts: [...DEFAULT_ALERT_PRODUCTS] })}
-        >
-          استعد القائمة الموصى بها ({DEFAULT_ALERT_PRODUCTS.length})
-        </button>
-
-        {/* Already-flagged keywords, including ones typed by hand that are not
-            in the current batch. */}
-        {prefs.alertProducts.length > 0 && (
-          <div className="list">
-            {prefs.alertProducts.map((n) => (
-              <button className="lrow" key={n} onClick={() => toggleAlert(n)}>
-                <span className="t">
-                  <b style={{ direction: "rtl", textAlign: "start", fontVariantNumeric: "normal" }}>
-                    {n}
-                  </b>
-                  <span>يشمل أي صنف يحتوي هذه الكلمات</span>
-                </span>
-                <span className="chip done">إزالة</span>
-              </button>
-            ))}
-          </div>
-        )}
-
-        <input
-          className="searchbar"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="اكتب اسم صنف أو كلمة منه"
-        />
-        {q.trim().length > 1 && !prefs.alertProducts.includes(q.trim()) && (
-          // Lets a product be flagged before it ever appears in a batch, and
-          // lets a short keyword stand in for every variant of a name.
-          <button className="btn b-line" onClick={() => { toggleAlert(q.trim()); setQ(""); }}>
-            أضف «{q.trim()}» ككلمة تنبيه
-          </button>
-        )}
-
-        {productNames.length === 0 ? (
-          <p className="note">
-            لا أصناف من دفعة حالية — تقدر تكتب الكلمة يدويًا بالأعلى.
-          </p>
-        ) : (
-          <>
-            <div className="list scrolly" style={{ maxHeight: "34dvh" }}>
-              {shown.map((n) => {
-                const on = prefs.alertProducts.includes(n);
-                return (
-                  <button className="lrow" key={n} onClick={() => toggleAlert(n)}>
-                    <span className="t">
-                      <b style={{ direction: "rtl", textAlign: "start", fontVariantNumeric: "normal" }}>
-                        {n}
-                      </b>
-                    </span>
-                    <span className={`chip ${on ? "done" : ""}`}>{on ? "مُفعّل" : "إضافة"}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </>
-        )}
       </div>
     </Sheet>
   );

@@ -43,7 +43,7 @@ export interface BuildStats {
  * spreadsheet has treated it as a number, and long ids can pick up separators.
  * Comparing on digits alone, without leading zeros, survives all of that.
  */
-function sameId(a: string | undefined, b: string | undefined): boolean {
+export function sameId(a: string | undefined, b: string | undefined): boolean {
   if (!a || !b) return false;
   if (a === b) return true;
   const norm = (v: string) => v.replace(/[^0-9A-Za-z]/g, "").replace(/^0+/, "");
@@ -289,62 +289,3 @@ export function explainDifference(order: PackOrder, reference: PackOrder): strin
   return out.length ? out : ["محتويات مختلفة عن باقي الطلبات"];
 }
 
-/** True when any line of this order is on the look-twice list. */
-export function orderHasAlert(order: PackOrder, alertNames: string[]): boolean {
-  if (alertNames.length === 0) return false;
-  // Defers to isAlertItem so the two can never drift apart: they did once,
-  // and the card lit up while the music stayed silent.
-  return order.items.some((it) => isAlertItem(it, alertNames));
-}
-
-export function isAlertItem(item: PackItem, alertNames: string[]): boolean {
-  const name = foldArabic(item.name);
-  // One direction only: the item name must contain the flagged phrase, so
-  // "ماتشا احتفالية فاخرة 50 جرام" also catches the bundles built around it.
-  //
-  // The reverse test used to be allowed as well, and it was a trap: any short
-  // entry that happened to sit inside a longer product name matched it, so a
-  // stray "ماتشا" in the list lit up ماتشا زعفراني too. A flagged phrase now
-  // has to be at least as specific as the product it is meant to catch.
-  return alertNames.some((n) => {
-    const needle = foldArabic(n);
-    return needle.length >= 3 && name.includes(needle);
-  });
-}
-
-/**
- * Catalog entries whose names are close enough to be grabbed by mistake.
- *
- * Mis-packing here is not random: it happens between products that read almost
- * the same on a shelf label — "ماتشا احتفالية فاخرة 50 جرام" and
- * "ماتشا زعفراني 150 جرام" share their first word and their shape. Naming the
- * specific look-alike on the packing card is far more useful than a generic
- * "check carefully", because it tells the packer what to rule out.
- */
-export function confusableNames(name: string, allNames: string[], max = 2): string[] {
-  const tokens = (s: string) => foldArabic(s).split(" ").filter(Boolean);
-  const mine = tokens(name);
-  if (mine.length === 0) return [];
-
-  const scored = allNames
-    .filter((other) => foldArabic(other) !== foldArabic(name))
-    .map((other) => {
-      const theirs = tokens(other);
-      const shared = theirs.filter((t) => mine.includes(t)).length;
-      // Dice coefficient rather than shared/longest: a short name like
-      // "بكج ماتشا وادواتها أبيض" is a real look-alike for the longer
-      // "بكج ماتشا احتفالية فاخرة 50 جرام وادواتها اسود", but dividing by the
-      // longer length alone scored it below threshold and hid the warning.
-      const overlap = (2 * shared) / (mine.length + theirs.length);
-      return { other, overlap, shared };
-    })
-    // Overlap alone, with no requirement to share the opening word: the
-    // standalone "ماتشا احتفالية فاخرة 50 جرام" and the bundle that contains
-    // it are a real mix-up, and they start with different words.
-    // At least two words in common: one shared word is far too weak — it
-    // paired "شاي ماتشا" with "ملعقة ماتشا", a tea and a spoon.
-    .filter((c) => c.shared >= 2 && c.overlap >= 0.4)
-    .sort((a, b) => b.overlap - a.overlap);
-
-  return scored.slice(0, max).map((c) => c.other);
-}
