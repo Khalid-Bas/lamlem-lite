@@ -4,12 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Camera, canScan } from "@/lib/camera";
 import {
   buildBatch, linkCatalog, describeOrder, findContentOutliers, explainDifference,
-  type BuildProgress, type BuildStats,
+  differsFromSession, type BuildProgress, type BuildStats,
 } from "@/lib/build-batch";
 import { readCatalog } from "@/lib/catalog-load";
 import {
-  clearAll, formatBytes, formatDuration, loadBatch, loadVideo,
-  saveBatch, saveVideo, upsertRecord, usage,
+  clearAll, formatBytes, formatDuration, loadBatch, loadPhoto, loadVideo,
+  saveBatch, savePhoto, saveVideo, upsertRecord, usage,
 } from "@/lib/store";
 import { buildAliases, resolveScan } from "@/lib/barcode";
 import {
@@ -33,8 +33,12 @@ import { readBomFile } from "@/lib/inventory/bom";
 import { useBackGuard } from "@/lib/use-back-guard";
 import type { Batch, PackOrder, PackRecord } from "@/lib/types";
 
-type Mode = "setup" | "idle" | "packing" | "group-collect" | "group-recording" | "group-verify";
-type ScanPurpose = "single" | "group-collect" | "group-verify" | "verify-one";
+type Mode =
+  | "setup" | "idle" | "packing"
+  | "group-collect" | "group-recording" | "group-verify"
+  /** A scanned order is on screen waiting for its still photo. */
+  | "photo-shoot";
+type ScanPurpose = "single" | "group-collect" | "group-verify" | "verify-one" | "photo";
 type Flash = { kind: "bad" | "warn" | "ok"; text: string } | null;
 
 export default function App() {
@@ -60,6 +64,24 @@ export default function App() {
   const [groupWarn, setGroupWarn] = useState<
     { orderNumber: string; reasons: string[]; total: number; addedNumber?: string } | null
   >(null);
+
+  /**
+   * Photo session: scan a sealed box, photograph it, scan the next.
+   *
+   * "single" stops after one order; "group" keeps going and holds every box to
+   * the contents of the first one scanned, because photographing a pile packed
+   * from one order only makes sense when the pile really is one order.
+   */
+  const [photoMode, setPhotoMode] = useState<"single" | "group" | null>(null);
+  /** Orders already photographed in the current session. */
+  const [photoIds, setPhotoIds] = useState<string[]>([]);
+  const [photoTarget, setPhotoTarget] = useState<PackOrder | null>(null);
+  const [photoWarn, setPhotoWarn] = useState<
+    { order: PackOrder; reasons: string[] } | null
+  >(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  /** The "one order or a group?" question, asked before the first scan. */
+  const [askPhotoKind, setAskPhotoKind] = useState(false);
 
   // Group session state
   const [groupIds, setGroupIds] = useState<string[]>([]);
@@ -142,6 +164,14 @@ export default function App() {
   const startedAtRef = useRef(0);
   const modeRef = useRef<Mode>("setup");
   const groupIdsRef = useRef<string[]>([]);
+  const photoModeRef = useRef<"single" | "group" | null>(null);
+  const photoIdsRef = useRef<string[]>([]);
+  const photoTargetRef = useRef<PackOrder | null>(null);
+  const photoBusyRef = useRef(false);
+  photoModeRef.current = photoMode;
+  photoIdsRef.current = photoIds;
+  photoTargetRef.current = photoTarget;
+  photoBusyRef.current = photoBusy;
   batchRef.current = batch;
   currentRef.current = current;
   startedAtRef.current = startedAt;
@@ -320,6 +350,13 @@ export default function App() {
       if (!order) return;
       const m = modeRef.current;
 
+      if (scanForRef.current === "photo") {
+        if (offerShotRef.current(order) && prefsRef.current.voice) {
+          speak(describeOrder(order));
+        }
+        return;
+      }
+
       if (m === "group-collect") {
         addToGroupRef.current(order.id);
         return;
@@ -463,6 +500,7 @@ export default function App() {
    */
   useBackGuard(
     () => {
+      if (photoTargetRef.current) { void cancelShotRef.current(); return true; }
       if (scanForRef.current) { closeScanner(); return true; }
       if (previewRef.current) { setPreview(null); return true; }
       if (sheetRef.current) { setSheet(null); return true; }
@@ -470,6 +508,174 @@ export default function App() {
     },
     () => confirm("هل أنت متأكد من أنك تريد الخروج من الصفحة؟"),
   );
+
+  /* ── photo session: scan a sealed box, photograph it, scan the next ── */
+
+  /** Puts one order on the shutter screen. Detection stops first, always. */
+  const beginShot = useCallback((order: PackOrder) => {
+    camRef.current?.stopScanning();
+    setScanFor(null);
+    setPhotoWarn(null);
+    setFlash(null);
+    setPhotoTarget(order);
+    photoTargetRef.current = order;
+    setMode("photo-shoot");
+    modeRef.current = "photo-shoot";
+  }, []);
+  const beginShotRef = useRef(beginShot);
+  beginShotRef.current = beginShot;
+
+  /**
+   * Accepts an order into the photo session, or refuses it with a reason.
+   *
+   * Every route into a shot goes through here — the scan and the manual picker
+   * alike — because a box chosen by hand can break the "this pile is all one
+   * order" assumption exactly as easily as a mis-scanned label, and skipping
+   * the check on the manual path would quietly defeat the whole point of the
+   * group mode. Returns true when the shutter screen was opened.
+   */
+  const offerShot = useCallback((order: PackOrder): boolean => {
+    if (photoIdsRef.current.includes(order.id)) {
+      setFlash({ kind: "warn", text: `#${order.orderNumber} صُوِّر بالفعل في هذه الجلسة` });
+      cueNeutral();
+      return false;
+    }
+    // A group session assumes every box holds the same thing. The first order
+    // sets what that is; each later one is measured against it and stops the
+    // flow if it differs, before any photo is taken.
+    if (photoModeRef.current === "group") {
+      const shot = photoIdsRef.current
+        .map((id) => batchRef.current?.orders.find((o) => o.id === id))
+        .filter((o): o is PackOrder => Boolean(o));
+      const reasons = differsFromSession(order, shot);
+      if (reasons.length > 0) {
+        cueScanFail();
+        setPhotoWarn({ order, reasons });
+        return false;
+      }
+    }
+    cueScanOk();
+    beginShotRef.current(order);
+    return true;
+  }, []);
+  const offerShotRef = useRef(offerShot);
+  offerShotRef.current = offerShot;
+
+  const startPhoto = useCallback(
+    async (kind: "single" | "group") => {
+      setAskPhotoKind(false);
+      setPhotoMode(kind);
+      photoModeRef.current = kind;
+      setPhotoIds([]);
+      photoIdsRef.current = [];
+      setPhotoTarget(null);
+      photoTargetRef.current = null;
+      setPhotoWarn(null);
+      setMode("idle");
+      modeRef.current = "idle";
+      await openScannerRef.current("photo");
+    },
+    [],
+  );
+
+  const endPhotoSession = useCallback(() => {
+    const n = photoIdsRef.current.length;
+    camRef.current?.stopScanning();
+    setScanFor(null);
+    setPhotoMode(null);
+    photoModeRef.current = null;
+    setPhotoTarget(null);
+    photoTargetRef.current = null;
+    setPhotoWarn(null);
+    setPhotoIds([]);
+    photoIdsRef.current = [];
+    setMode("idle");
+    modeRef.current = "idle";
+    if (n > 0) setFlash({ kind: "ok", text: `تم حفظ ${n} صورة` });
+  }, []);
+
+  /**
+   * Takes the shot for the order on screen and files it under that order.
+   *
+   * One photo, one order, always — even in a group session, where the whole
+   * point is that each box ends up with its own picture named after its own
+   * order number. The label was scanned moments earlier, on the sealed box, so
+   * the record is marked verified by the same act that opened this screen.
+   */
+  const capturePhoto = useCallback(async () => {
+    const order = photoTargetRef.current;
+    const cam = camRef.current;
+    if (!order || !cam || photoBusyRef.current) return;
+    setPhotoBusy(true);
+    photoBusyRef.current = true;
+    try {
+      const blob = await cam.capturePhoto();
+      if (!blob) {
+        cueScanFail();
+        setFlash({ kind: "bad", text: "تعذّر التقاط الصورة — حاول مرة أخرى" });
+        return;
+      }
+      await savePhoto(order.id, blob);
+
+      const base = batchRef.current;
+      if (base) {
+        const next = upsertRecord(base, {
+          orderId: order.id,
+          // Nothing was timed: the packing happened before the label was
+          // scanned, so a duration here would be the shutter delay and nothing
+          // more. The summary shows «صورة» in place of a time.
+          durationMs: 0,
+          packedAt: new Date().toISOString(),
+          hasVideo: false,
+          hasPhoto: true,
+          photoBytes: blob.size,
+          verified: true,
+        });
+        batchRef.current = next;
+        setBatch(next);
+        await saveBatch(next);
+        if (next.records.length >= next.orders.length) cueBatchDone();
+        else cueOrderDone();
+      }
+
+      const ids = [...photoIdsRef.current, order.id];
+      photoIdsRef.current = ids;
+      setPhotoIds(ids);
+      setPhotoTarget(null);
+      photoTargetRef.current = null;
+      setFlash({ kind: "ok", text: `حُفظت صورة #${order.orderNumber}` });
+
+      if (photoModeRef.current === "group") {
+        // Straight back to the scanner for the next box — scan, shoot, repeat.
+        await openScannerRef.current("photo");
+      } else {
+        setPhotoMode(null);
+        photoModeRef.current = null;
+        setMode("idle");
+        modeRef.current = "idle";
+      }
+    } finally {
+      setPhotoBusy(false);
+      photoBusyRef.current = false;
+    }
+  }, []);
+
+  /** Backs out of a shot without taking it, returning to the scanner. */
+  const cancelShot = useCallback(async () => {
+    setPhotoTarget(null);
+    photoTargetRef.current = null;
+    if (photoModeRef.current) {
+      setMode("idle");
+      modeRef.current = "idle";
+      await openScannerRef.current("photo");
+    } else {
+      setMode("idle");
+      modeRef.current = "idle";
+    }
+  }, []);
+
+  const cancelShotRef = useRef(cancelShot);
+  cancelShotRef.current = cancelShot;
 
   /* ── group session ── */
   const startGroup = useCallback(async () => {
@@ -615,6 +821,12 @@ export default function App() {
             )}
           </>
         )}
+        {photoMode && (
+          <span className="chip shot">
+            صور — {photoIds.length}
+            {photoMode === "group" ? " · مجموعة" : ""}
+          </span>
+        )}
         {/* Available during packing too: opening the list only previews now, so
             browsing another order can no longer disturb the recording. */}
         {mode !== "group-recording" && (
@@ -644,6 +856,9 @@ export default function App() {
           <>
             <button className="btn b-line" onClick={() => void startGroup()}>
               تجهيز مجموعة طلبات
+            </button>
+            <button className="btn b-line" onClick={() => setAskPhotoKind(true)}>
+              تصوير الطلبات (صورة بدل فيديو)
             </button>
             <p className="note" style={{ textAlign: "center" }}>
               {allDone
@@ -760,7 +975,7 @@ export default function App() {
         playsInline
         muted
         autoPlay
-        className={scanFor ? "scan-video" : "cam-hidden"}
+        className={scanFor || mode === "photo-shoot" ? "scan-video" : "cam-hidden"}
       />
 
       {/* ── scanner chrome, drawn over the preview ── */}
@@ -773,13 +988,21 @@ export default function App() {
                 ? `تحقق — ${verified.length} / ${groupIds.length} · التسجيل مستمر`
                 : scanFor === "verify-one"
                   ? `تحقق — امسح بوليصة #${verifyOne?.orderNumber} مرة أخرى`
-                  : "وجّه الكاميرا نحو الباركود"
+                  : scanFor === "photo"
+                    ? photoMode === "group"
+                      ? `امسح بوليصة الطلب التالي — ${photoIds.length} مصوَّر`
+                      : "امسح بوليصة الطلب الذي انتهيت من تجهيزه"
+                    : "وجّه الكاميرا نحو الباركود"
           }
           flash={flash}
           onClose={() => {
             if (scanFor === "group-collect" && groupIds.length === 0) {
               setMode("idle");
               modeRef.current = "idle";
+            }
+            if (scanFor === "photo") {
+              endPhotoSession();
+              return;
             }
             closeScanner();
           }}
@@ -849,6 +1072,56 @@ export default function App() {
                   ابدأ التسجيل ({groupIds.length})
                 </button>
               </>
+            ) : scanFor === "photo" ? (
+              <>
+                {photoWarn && (
+                  <div className="mismatch">
+                    <b>تحذير: الطلب #{photoWarn.order.orderNumber} غير مطابق</b>
+                    <span>
+                      باقي طلبات هذه المجموعة تحتوي أصنافًا مختلفة عن هذا الطلب.
+                    </span>
+                    <ul>
+                      {photoWarn.reasons.map((r) => (
+                        <li key={r}>{r}</li>
+                      ))}
+                    </ul>
+                    <div className="b-row">
+                      <button className="btn b-stop" onClick={() => setPhotoWarn(null)}>
+                        تخطَّ هذا الطلب
+                      </button>
+                      <button
+                        className="btn b-line"
+                        onClick={() => beginShot(photoWarn.order)}
+                      >
+                        صوّره رغم الاختلاف
+                      </button>
+                    </div>
+                  </div>
+                )}
+                <p className="note">
+                  {photoMode === "group"
+                    ? "امسح بوليصة كل صندوق ثم صوّره — كل طلب يُحفظ في صورة باسمه."
+                    : "امسح البوليصة، ثم صوّر الطلب — تُحفظ الصورة باسم رقم الطلب."}
+                </p>
+                {photoIds.length > 0 && (
+                  <p className="note">تم تصوير {photoIds.length} طلب في هذه الجلسة.</p>
+                )}
+                <button className="btn b-ghost" onClick={() => setManualPick((v) => !v)}>
+                  {manualPick ? "إخفاء الاختيار اليدوي" : "اختيار الطلب يدويًا"}
+                </button>
+                {manualPick && (
+                  <ManualPicker
+                    orders={orders.filter((o) => !photoIds.includes(o.id))}
+                    onAdd={(id) => {
+                      const o = orders.find((x) => x.id === id);
+                      if (o) offerShot(o);
+                    }}
+                  />
+                )}
+                <button className="btn b-go" onClick={endPhotoSession}>
+                  {photoIds.length > 0 ? `إنهاء (${photoIds.length} صورة)` : "إنهاء"}
+                </button>
+              </>
             ) : scanFor === "verify-one" ? (
               <>
                 <p className="note">
@@ -894,6 +1167,44 @@ export default function App() {
             ) : null
           }
         />
+      )}
+
+      {mode === "photo-shoot" && photoTarget && (
+        <ShootOverlay
+          order={photoTarget}
+          shot={photoIds.length}
+          group={photoMode === "group"}
+          busy={photoBusy}
+          flash={flash}
+          onCapture={() => void capturePhoto()}
+          onCancel={() => void cancelShot()}
+        />
+      )}
+
+      {askPhotoKind && (
+        <Sheet title="تصوير الطلبات" onClose={() => setAskPhotoKind(false)}>
+          <p className="note">
+            بعد أن تنتهي من تجهيز الطلب، امسح البوليصة ثم صوّر الصندوق — تُحفظ
+            الصورة باسم رقم الطلب.
+          </p>
+          <div className="list">
+            <button className="lrow" onClick={() => void startPhoto("single")}>
+              <span className="t">
+                <b>طلب واحد</b>
+                <span>امسح بوليصة واحدة، صوّرها، وانتهى.</span>
+              </span>
+            </button>
+            <button className="lrow" onClick={() => void startPhoto("group")}>
+              <span className="t">
+                <b>مجموعة طلبات</b>
+                <span>
+                  امسح وصوّر صندوقًا تلو الآخر، ويتحقّق التطبيق أن كل الطلبات
+                  تحتوي نفس الأصناف تمامًا.
+                </span>
+              </span>
+            </button>
+          </div>
+        </Sheet>
       )}
 
       {sheet === "orders" && batch && (
@@ -1028,6 +1339,47 @@ function ScannerOverlay({
         {flash && <div className={`flash ${flash.kind}`}>{flash.text}</div>}
         {footer}
         <button className="btn b-line" onClick={onClose}>إغلاق</button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The shutter screen: the order that was just scanned, over a live viewfinder.
+ *
+ * The order card is on screen while the shot is framed so the contents can be
+ * checked one last time against the box, and the order number is repeated on
+ * the button because that is the name the file will carry.
+ */
+function ShootOverlay({
+  order, shot, group, busy, flash, onCapture, onCancel,
+}: {
+  order: PackOrder;
+  shot: number;
+  group: boolean;
+  busy: boolean;
+  flash: Flash;
+  onCapture: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="scanner">
+      <div className="scanner-cam">
+        <div className="camhint">
+          صوّر صندوق الطلب #{order.orderNumber}
+          {group ? ` · ${shot} مصوَّر` : ""}
+        </div>
+      </div>
+      <div className="scanner-foot">
+        {flash && <div className={`flash ${flash.kind}`}>{flash.text}</div>}
+        <OrderCard order={order} compact />
+        <button className="btn b-shot" disabled={busy} onClick={onCapture}>
+          <span className="ring" aria-hidden="true" />
+          {busy ? "جارٍ الحفظ…" : `التقط صورة #${order.orderNumber}`}
+        </button>
+        <button className="btn b-ghost" onClick={onCancel}>
+          إلغاء والعودة للمسح
+        </button>
       </div>
     </div>
   );
@@ -1303,7 +1655,9 @@ function Summary({
   onRelink: (f: File) => Promise<string>;
 }) {
   const [store, setStore] = useState<{ used: number; quota: number } | null>(null);
-  const [preview, setPreview] = useState<{ url: string; label: string } | null>(null);
+  const [preview, setPreview] = useState<
+    { url: string; label: string; photo?: boolean } | null
+  >(null);
   const [upload, setUpload] = useState<{ busy: boolean; msg: string }>({ busy: false, msg: "" });
   const relinkRef = useRef<HTMLInputElement>(null);
   const [relinkMsg, setRelinkMsg] = useState("");
@@ -1322,8 +1676,11 @@ function Summary({
 
   const byId = new Map(batch.orders.map((o) => [o.id, o]));
   const records = [...batch.records].sort((a, b) => a.packedAt.localeCompare(b.packedAt));
-  const totalMs = records.reduce((s, r) => s + r.durationMs, 0);
-  const avg = records.length ? totalMs / records.length : 0;
+  // Photo records carry no duration — the packing happened before the label
+  // was scanned — so they must not drag the average toward zero.
+  const timed = records.filter((r) => r.durationMs > 0);
+  const totalMs = timed.reduce((s, r) => s + r.durationMs, 0);
+  const avg = timed.length ? totalMs / timed.length : 0;
 
   const videoKeyOf = (r: PackRecord) => r.videoKey ?? r.orderId;
 
@@ -1348,6 +1705,13 @@ function Summary({
   }
 
   const withVideo = clips.filter((c) => c.records[0].hasVideo).length;
+  const withPhoto = clips.filter((c) => c.records[0].hasPhoto).length;
+  /** Every clip and photo, the set the Drive and share buttons act on. */
+  const withFile = withVideo + withPhoto;
+
+  /** `SMSA - 278290423.jpg` — a photo is always exactly one order. */
+  const photoName = (r: PackRecord) =>
+    `${clipFileName([byId.get(r.orderId)?.orderNumber ?? r.orderId], carrierCode([byId.get(r.orderId)]))}.jpg`;
 
   /** `SMSA - 278290423 - 278307194 - … .webm`, every order the clip covers. */
   const clipName = (rs: PackRecord[]) =>
@@ -1357,9 +1721,14 @@ function Summary({
     );
 
   async function watch(rs: PackRecord[]) {
-    const blob = await loadVideo(videoKeyOf(rs[0]));
+    const photo = rs[0].hasPhoto;
+    const blob = photo ? await loadPhoto(rs[0].orderId) : await loadVideo(videoKeyOf(rs[0]));
     if (!blob) return;
-    setPreview({ url: URL.createObjectURL(blob), label: clipName(rs) });
+    setPreview({
+      url: URL.createObjectURL(blob),
+      label: photo ? photoName(rs[0]) : clipName(rs),
+      photo,
+    });
   }
 
   /**
@@ -1379,17 +1748,21 @@ function Summary({
     void (async () => {
       const map = new Map<string, File>();
       for (const clip of clips) {
-        if (!clip.records[0].hasVideo) continue;
-        const blob = await loadVideo(clip.key);
+        const first = clip.records[0];
+        if (!first.hasVideo && !first.hasPhoto) continue;
+        const blob = first.hasPhoto
+          ? await loadPhoto(first.orderId)
+          : await loadVideo(clip.key);
         if (cancelled) return;
-        if (blob) {
-          map.set(
-            clip.key,
-            new File([blob], `${clipName(clip.records)}.webm`, {
-              type: blob.type || "video/webm",
-            }),
-          );
-        }
+        if (!blob) continue;
+        map.set(
+          clip.key,
+          first.hasPhoto
+            ? new File([blob], photoName(first), { type: blob.type || "image/jpeg" })
+            : new File([blob], `${clipName(clip.records)}.webm`, {
+                type: blob.type || "video/webm",
+              }),
+        );
       }
       if (!cancelled) setReadyFiles(map);
     })();
@@ -1407,7 +1780,10 @@ function Summary({
     if (files.length === 0) {
       setUpload({
         busy: false,
-        msg: readyFiles.size === 0 ? "جارٍ تجهيز الفيديوهات… أعد المحاولة بعد لحظة" : "لا فيديوهات للمشاركة",
+        msg:
+          readyFiles.size === 0
+            ? "جارٍ تجهيز الملفات… أعد المحاولة بعد لحظة"
+            : "لا ملفات للمشاركة",
       });
       return;
     }
@@ -1421,7 +1797,7 @@ function Summary({
 
     // Called synchronously so the tap is still "active" as far as Chrome is
     // concerned; anything awaited before this point loses that permission.
-    shareFiles(files, "فيديوهات تجهيز الطلبات")
+    shareFiles(files, "ملفات تجهيز الطلبات")
       .then(() => setUpload({ busy: false, msg: "" }))
       .catch((e: unknown) => {
         const name = e instanceof DOMException ? e.name : "";
@@ -1440,12 +1816,13 @@ function Summary({
   }
 
   async function download(rs: PackRecord[]) {
-    const blob = await loadVideo(videoKeyOf(rs[0]));
+    const photo = rs[0].hasPhoto;
+    const blob = photo ? await loadPhoto(rs[0].orderId) : await loadVideo(videoKeyOf(rs[0]));
     if (!blob) return;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${clipName(rs)}.webm`;
+    a.download = photo ? photoName(rs[0]) : `${clipName(rs)}.webm`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
   }
@@ -1476,26 +1853,36 @@ function Summary({
       setUpload({ busy: true, msg: `تجهيز المجلد «${name}»…` });
       const folderId = await ensureFolder(token, name, parent);
 
-      // One upload per clip, named the same way the summary names it, so a
-      // file downloaded to the phone and the one in Drive match.
-      const jobs = clips.filter((c) => c.records[0].hasVideo);
+      // One upload per clip or photo, named the same way the summary names it,
+      // so a file downloaded to the phone and the one in Drive match.
+      const jobs = clips.filter((c) => c.records[0].hasVideo || c.records[0].hasPhoto);
 
       let uploaded = 0;
       for (let i = 0; i < jobs.length; i++) {
         setUpload({ busy: true, msg: `رفع ${i + 1} من ${jobs.length}…` });
-        const blob = await loadVideo(jobs[i].key);
+        const first = jobs[i].records[0];
+        const blob = first.hasPhoto
+          ? await loadPhoto(first.orderId)
+          : await loadVideo(jobs[i].key);
         if (!blob) continue;
-        await uploadFile(token, folderId, `${clipName(jobs[i].records)}.webm`, blob);
+        const name = first.hasPhoto
+          ? photoName(first)
+          : `${clipName(jobs[i].records)}.webm`;
+        await uploadFile(token, folderId, name, blob);
         uploaded++;
       }
 
       // A manifest so a shared clip can still be traced back to every order.
       const csv = [
-        "رقم الطلب,العميل,المدينة,المدة,وقت التعبئة,ملف الفيديو",
+        "رقم الطلب,العميل,المدينة,المدة,وقت التعبئة,الملف",
         ...clips.flatMap((c) =>
           c.records.map((r) => {
             const o = byId.get(r.orderId);
-            const file = r.hasVideo ? `${clipName(c.records)}.webm` : "";
+            const file = r.hasPhoto
+              ? photoName(r)
+              : r.hasVideo
+                ? `${clipName(c.records)}.webm`
+                : "";
             const cell = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
             return [
               o?.orderNumber ?? r.orderId,
@@ -1514,7 +1901,7 @@ function Summary({
 
       setUpload({
         busy: false,
-        msg: `تم رفع ${uploaded} فيديو و ملخّص إلى «${name}»`,
+        msg: `تم رفع ${uploaded} ملف و ملخّص إلى «${name}»`,
       });
     } catch (e) {
       setUpload({
@@ -1559,19 +1946,25 @@ function Summary({
             {invMsg && <p className="note">{invMsg}</p>}
             <button
               className="btn b-drive"
-              disabled={upload.busy || withVideo === 0}
-              onClick={() => void share(clips.filter((c) => c.records[0].hasVideo).map((c) => c.records))}
+              disabled={upload.busy || withFile === 0}
+              onClick={() =>
+                void share(
+                  clips
+                    .filter((c) => c.records[0].hasVideo || c.records[0].hasPhoto)
+                    .map((c) => c.records),
+                )
+              }
             >
               {upload.busy
                 ? upload.msg
-                : withVideo === 0
-                  ? "لا فيديوهات بعد"
-                  : `أرسل ${withVideo} فيديو إلى Drive`}
+                : withFile === 0
+                  ? "لا ملفات بعد"
+                  : `أرسل ${withFile} ملف إلى Drive`}
             </button>
             {driveConfigured(prefs.driveClientId) && (
               <button
                 className="btn b-ghost"
-                disabled={upload.busy || withVideo === 0}
+                disabled={upload.busy || withFile === 0}
                 onClick={() => void uploadAll()}
               >
                 رفع تلقائي إلى مجلد Drive باسم الدفعة
@@ -1584,7 +1977,8 @@ function Summary({
               <button
                 className="btn b-stop"
                 onClick={() => {
-                  if (confirm("سيُحذف كل شيء: الطلبات والفيديوهات. متأكد؟")) void onReset();
+                  if (confirm("سيُحذف كل شيء: الطلبات والفيديوهات والصور. متأكد؟"))
+                    void onReset();
                 }}
               >
                 دفعة جديدة
@@ -1594,8 +1988,12 @@ function Summary({
         }
       >
         <p className="note">
-          {records.length} طلب · متوسط {formatDuration(avg)} للطلب · إجمالي{" "}
-          {formatDuration(totalMs)}
+          {records.length} طلب
+          {/* Timing only means something for recorded orders; a batch shot as
+              photos has no durations, and "متوسط 0:00" reads like a fault. */}
+          {timed.length > 0 &&
+            ` · متوسط ${formatDuration(avg)} للطلب · إجمالي ${formatDuration(totalMs)}`}
+          {withPhoto > 0 && ` · ${withPhoto} صورة`}
           {store && ` · مساحة مستخدمة ${formatBytes(store.used)}`}
         </p>
 
@@ -1603,7 +2001,8 @@ function Summary({
         {relinkMsg && <div className="flash ok">{relinkMsg}</div>}
         {!driveConfigured(prefs.driveClientId) && (
           <p className="note">
-            الرفع إلى Drive غير مفعّل — يحتاج ضبط <code>NEXT_PUBLIC_GOOGLE_CLIENT_ID</code>.
+            الرفع التلقائي غير مفعّل — أضِف معرّف Google من الإعدادات ← الرفع إلى
+            Drive. زر المشاركة أعلاه يعمل بدونه.
           </p>
         )}
 
@@ -1629,7 +2028,7 @@ function Summary({
             const orders = rs.map((r) => byId.get(r.orderId));
             const numbers = orders.map((o, j) => o?.orderNumber ?? rs[j].orderId);
             const totalDur = rs.reduce((sum, r) => sum + r.durationMs, 0);
-            const bytes = first.videoBytes;
+            const bytes = first.videoBytes ?? first.photoBytes;
             return (
               <div className="lrow" key={clip.key}>
                 <span className="n">{i + 1}</span>
@@ -1640,16 +2039,17 @@ function Summary({
                   </span>
                   <span>
                     {new Date(first.packedAt).toLocaleTimeString("ar-SA")}
-                    {bytes ? ` · ${formatBytes(bytes)}` : " · بلا فيديو"}
+                    {bytes ? ` · ${formatBytes(bytes)}` : " · بلا ملف"}
+                    {first.hasPhoto ? " · صورة" : ""}
                     {rs.length > 1 ? ` · مجموعة من ${rs.length} طلبات` : ""}
                   </span>
                 </span>
                 {rs.every((r) => r.verified) && <span className="chip done">✓ تحقّق</span>}
-                <span className="dur">{formatDuration(totalDur)}</span>
-                {first.hasVideo && (
+                <span className="dur">{totalDur > 0 ? formatDuration(totalDur) : "—"}</span>
+                {(first.hasVideo || first.hasPhoto) && (
                   <span className="acts">
                     <button className="chip" onClick={() => void watch(rs)}>
-                      مشاهدة
+                      {first.hasPhoto ? "عرض" : "مشاهدة"}
                     </button>
                     <button className="chip" onClick={() => void download(rs)}>
                       حفظ
@@ -1667,7 +2067,8 @@ function Summary({
         </div>
 
         <p className="note">
-          الفيديوهات محفوظة على هذا الجهاز فقط. احفظ ما تحتاجه قبل بدء دفعة جديدة.
+          الفيديوهات والصور محفوظة على هذا الجهاز فقط. احفظ ما تحتاجه قبل بدء
+          دفعة جديدة.
         </p>
       </Sheet>
 
@@ -1676,7 +2077,11 @@ function Summary({
           <div className="inner" onClick={(e) => e.stopPropagation()}>
             <div className="grab" />
             <h3 className="sheet-title">{preview.label}</h3>
-            <video src={preview.url} controls autoPlay playsInline className="preview" />
+            {preview.photo ? (
+              <img src={preview.url} alt={preview.label} className="preview" />
+            ) : (
+              <video src={preview.url} controls autoPlay playsInline className="preview" />
+            )}
             <button className="btn b-line" onClick={() => setPreview(null)}>إغلاق</button>
           </div>
         </div>

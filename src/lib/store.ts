@@ -11,9 +11,10 @@
 import type { Batch, PackRecord } from "./types.ts";
 
 const DB_NAME = "lamlem-lite";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_STATE = "state";
 const STORE_VIDEOS = "videos";
+const STORE_PHOTOS = "photos";
 
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -22,6 +23,7 @@ function open(): Promise<IDBDatabase> {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_STATE)) db.createObjectStore(STORE_STATE);
       if (!db.objectStoreNames.contains(STORE_VIDEOS)) db.createObjectStore(STORE_VIDEOS);
+      if (!db.objectStoreNames.contains(STORE_PHOTOS)) db.createObjectStore(STORE_PHOTOS);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -54,6 +56,7 @@ export const loadBatch = () =>
 export const clearAll = async () => {
   await tx(STORE_STATE, "readwrite", (s) => s.clear());
   await tx(STORE_VIDEOS, "readwrite", (s) => s.clear());
+  await tx(STORE_PHOTOS, "readwrite", (s) => s.clear());
 };
 
 export const saveVideo = (orderId: string, blob: Blob) =>
@@ -64,6 +67,21 @@ export const loadVideo = (orderId: string) =>
 
 export const deleteVideo = (orderId: string) =>
   tx(STORE_VIDEOS, "readwrite", (s) => s.delete(orderId));
+
+/**
+ * Photos live in their own store, keyed by order id.
+ *
+ * Always one per order, never shared: a group photo session takes a separate
+ * shot of every box, which is the whole reason the mode exists.
+ */
+export const savePhoto = (orderId: string, blob: Blob) =>
+  tx(STORE_PHOTOS, "readwrite", (s) => s.put(blob, orderId));
+
+export const loadPhoto = (orderId: string) =>
+  tx<Blob | undefined>(STORE_PHOTOS, "readonly", (s) => s.get(orderId));
+
+export const deletePhoto = (orderId: string) =>
+  tx(STORE_PHOTOS, "readwrite", (s) => s.delete(orderId));
 
 /** Rough bytes used, so the packer can tell when to export and clear. */
 export async function usage(): Promise<{ used: number; quota: number } | null> {

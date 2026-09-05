@@ -204,6 +204,48 @@ export class Camera {
     this.cooldown.clear();
   }
 
+  /**
+   * Takes one still frame from the live stream.
+   *
+   * `ImageCapture.takePhoto()` first: it uses the sensor's photo mode, so on a
+   * phone it returns a far larger image than the preview resolution — which
+   * matters when the point of the shot is being able to read a label back off
+   * it later. It is not universally implemented and can reject on devices that
+   * do implement it, so a canvas grab of the current frame is always there as
+   * a fallback; that yields exactly what is on screen, which is never wrong,
+   * only smaller.
+   */
+  async capturePhoto(quality = 0.92): Promise<Blob | null> {
+    const track = this.stream?.getVideoTracks()[0];
+    if (!track) return null;
+
+    const Ctor = (globalThis as unknown as {
+      ImageCapture?: new (t: MediaStreamTrack) => { takePhoto(): Promise<Blob> };
+    }).ImageCapture;
+    if (Ctor) {
+      try {
+        const shot = await new Ctor(track).takePhoto();
+        if (shot.size > 0) return shot;
+      } catch {
+        // Fall through to the canvas grab below.
+      }
+    }
+
+    const v = this.video;
+    const w = v.videoWidth;
+    const h = v.videoHeight;
+    if (v.readyState < 2 || !w || !h) return null;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(v, 0, 0, w, h);
+    return new Promise((resolve) =>
+      canvas.toBlob((b) => resolve(b), "image/jpeg", quality),
+    );
+  }
+
   private static mimeType(): string {
     const candidates = [
       "video/webm;codecs=vp9",

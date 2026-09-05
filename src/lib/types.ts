@@ -38,6 +38,13 @@ export interface PackRecord {
   hasVideo: boolean;
   videoBytes?: number;
   /**
+   * Set when the order was captured as a still photo instead of a video. A
+   * photo always belongs to exactly one order — that is the point of the mode
+   * — so unlike a group clip it is never shared between records.
+   */
+  hasPhoto?: boolean;
+  photoBytes?: number;
+  /**
    * Key the clip is stored under. Normally the order's own id, but a group
    * session points several orders at one shared recording.
    */

@@ -223,6 +223,50 @@ test("names a missing item and a wrong quantity", () => {
   assert.ok(reasons.some((r) => r.includes("الكمية 3 بدل 1")), reasons.join(" | "));
 });
 
+/* ── photo sessions: every box must hold the same thing ── */
+import { differsFromSession } from "../src/lib/build-batch.ts";
+
+test("the first order of a photo session sets what the session is", () => {
+  const first = ord("1", [{ name: "شاي ماتشا 150g", quantity: 1 }]);
+  // Nothing to compare against yet, so the opening scan can never be rejected.
+  assert.deepEqual(differsFromSession(first, []), []);
+  assert.deepEqual(
+    differsFromSession(ord("2", [{ name: "شاي ماتشا 150g", quantity: 1 }]), [first]),
+    [],
+  );
+});
+
+test("names what makes a scanned box differ from the rest of the session", () => {
+  const first = ord("1", [{ name: "شاي ماتشا 150g", quantity: 1 }]);
+  const odd = ord("2", [
+    { name: "شاي ماتشا 150g", quantity: 1 },
+    { name: "ملعقة ماتشا", quantity: 1 },
+  ]);
+  const reasons = differsFromSession(odd, [first]);
+  assert.ok(reasons.some((r) => r.includes("صنف إضافي") && r.includes("ملعقة ماتشا")), reasons.join(" | "));
+});
+
+test("a different quantity or variant of the same product still differs", () => {
+  const first = ord("1", [{ name: "بكج ال 99", quantity: 1, optionText: "نوع الحليب: مشروب اوتلي" }]);
+  assert.ok(
+    differsFromSession(
+      ord("2", [{ name: "بكج ال 99", quantity: 1, optionText: "نوع الحليب: مشروب اوتسايد" }]),
+      [first],
+    ).length > 0,
+  );
+  assert.ok(
+    differsFromSession(
+      ord("3", [{ name: "بكج ال 99", quantity: 2, optionText: "نوع الحليب: مشروب اوتلي" }]),
+      [first],
+    ).length > 0,
+  );
+});
+
+test("re-scanning the order that opened the session is not a mismatch", () => {
+  const first = ord("1", [{ name: "شاي ماتشا 150g", quantity: 1 }]);
+  assert.deepEqual(differsFromSession(first, [first]), []);
+});
+
 /* ── drive folder targeting ── */
 import { dayFolderName } from "../src/lib/drive.ts";
 

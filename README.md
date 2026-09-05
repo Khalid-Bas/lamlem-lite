@@ -21,6 +21,7 @@ your customer data leaves the device.
 | **Next** | Tap **مسح الباركود** and scan the next label: the current order is saved and the new one starts in one move. Or tap **تم** to just finish. |
 | **Group** | **تجهيز مجموعة طلبات** — scan several labels, pack them together, then re-scan each label to confirm. **The recording runs through the whole session, verification included**, so the confirming scan of every sealed box is on film. All of them are marked done and share one clip. |
 | **Summary** | Per-order time, customer name, video size, **مشاهدة** to preview in place, **حفظ** to download, and **رفع … فيديو إلى Drive** — available at any time, not only once the batch is finished. |
+| **Photo instead of video** | **تصوير الطلبات** — pack first, then scan the sealed box and photograph it. One photo per order, named after the order number. |
 | **Stocktake** | **جرد الكميات (Excel)** — one workbook, two sheets: what sold, and every carton, cup, sticker and tin that sale consumed. |
 
 Tapping an order in **الطلبات** opens a **read-only preview** — items, photos,
@@ -36,6 +37,38 @@ red screen if one differs, naming the exact reason: *صنف إضافي: ملعق
 *عدد الأصناف 2 بدل 1*, *الكمية 3 بدل 1*. Continuing is deliberate; cancelling
 returns to the home screen with nothing recorded. Packing several boxes from one
 pile only works when they hold the same thing, and this is where that goes wrong.
+
+## Photographing orders instead of filming them
+
+**تصوير الطلبات (صورة بدل فيديو)** on the home screen asks one question first —
+**طلب واحد** or **مجموعة طلبات** — and then runs the opposite way round from the
+video flow: you pack first, and the camera comes out at the end.
+
+1. Scan the label on the box you have just finished.
+2. The order appears over a live viewfinder, so the contents can be checked one
+   last time against what is in front of you.
+3. Tap the shutter. The photo is saved as **`SMSA - 276451900.jpg`** — carrier
+   then order number, the same naming the clips use.
+
+**طلب واحد** stops there. **مجموعة طلبات** goes straight back to the scanner for
+the next box: scan, shoot, scan, shoot. **Every order still gets its own photo
+under its own number** — a group session shares a video, but never a photo,
+because a picture of one box is only evidence for that box.
+
+In a group session the first order scanned sets what the session is, and every
+later scan is held to it. Anything that differs stops the flow *before* the
+shutter screen opens and names the reason — *صنف إضافي: ملعقة ماتشا*,
+*الكمية 3 بدل 1* — offering **تخطَّ هذا الطلب** or **صوّره رغم الاختلاف**. The
+manual picker runs the same check, so choosing a box by hand cannot slip past it.
+
+Because the label is scanned on the sealed box moments before the shot, a photo
+record is marked **✓ تحقّق** on the spot; there is no second confirming scan to
+do. Photos carry no duration — the packing happened before the scan — so the
+summary shows **—** in place of a time and counts them separately.
+
+Photos sit alongside clips everywhere else: **عرض** to look at one in place,
+**حفظ** to download, **مشاركة**, and both the share sheet and the Drive upload
+send them with the videos. **دفعة جديدة** deletes them along with everything else.
 
 ## جرد الكميات — the stocktake
 
@@ -222,6 +255,12 @@ Driven through the real UI against your real files (`Prep Orders.pdf`,
 - group session: collect 3 → record → stop → verify 3 → all marked done,
   counter 2/30 → 5/30, each row labelled *ضمن مجموعة*
 - summary shows customer names; timings and IndexedDB persistence survive reload
+- **photo mode**, driven through the real UI against a synthetic camera: a group
+  session shot three boxes, each saved as its own JPEG — `DN - 276219057.jpg`,
+  640×480, real JPEG magic bytes — and scanning a box holding different contents
+  stopped before the shutter, naming *صنف إضافي: شاي ماتشا 150g*. Single mode
+  shot one order and returned home. Photos survived a reload, and a batch mixing
+  four photos with one clip listed both correctly
 - **جرد الكميات** against the same batch: 8 sold lines / 33 units over 30 orders,
   exploded into 15 components — 27 small cartons, 76 new-design cups, 37 sticker
   sheets, 31 free mugs cards, 29 matcha tins — each figure checked by hand
@@ -259,8 +298,11 @@ inside a group session.
   again afterwards — except while a recording is running, which necessarily
   keeps it open. The preview is hidden during packing; the scan button sits
   where it used to be.
-- **Videos live only on that phone**, in IndexedDB, unless you upload them.
-  "دفعة جديدة" deletes all of them.
+- **Videos and photos live only on that phone**, in IndexedDB, unless you upload
+  them. "دفعة جديدة" deletes all of them.
+- **A photo is taken at the sensor's photo resolution** where the browser
+  supports `ImageCapture`, and falls back to a frame off the live preview
+  (which follows the video-quality setting) where it does not.
 - **Video is picture-only, no audio.** Fewer permissions, smaller files.
 - A group session stores **one clip shared by every order in it**; the per-order
   time shown is the session split evenly, and the row says *ضمن مجموعة*.

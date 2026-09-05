@@ -289,3 +289,18 @@ export function explainDifference(order: PackOrder, reference: PackOrder): strin
   return out.length ? out : ["محتويات مختلفة عن باقي الطلبات"];
 }
 
+/**
+ * Checks a freshly scanned order against the ones already handled in a
+ * session, and explains any difference.
+ *
+ * Used by the photo flow, where boxes are scanned one at a time rather than
+ * collected up front: the first order sets what the session is, and every
+ * later scan has to hold the same thing. Returns an empty list when it
+ * matches, so the caller can treat "no reasons" as "carry on".
+ */
+export function differsFromSession(order: PackOrder, session: PackOrder[]): string[] {
+  const reference = session[0];
+  if (!reference || reference.id === order.id) return [];
+  if (orderSignature(order) === orderSignature(reference)) return [];
+  return explainDifference(order, reference);
+}

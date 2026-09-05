@@ -71,6 +71,16 @@ img{display:block;max-width:100%}
   background:var(--panel);border-top:1px solid var(--line);
   padding:12px 14px calc(12px + var(--safe-b));display:flex;flex-direction:column;gap:10px}
 
+/* The shutter. Deliberately unlike every other button in the app: it is the
+   one control that captures, and it sits over a live viewfinder where a flat
+   rectangle would read as chrome rather than as a camera button. */
+.b-shot{background:#fff;color:#101214;min-height:66px;font-size:17px;font-weight:800;
+  border-radius:18px;display:flex;align-items:center;justify-content:center;gap:12px}
+.b-shot .ring{width:26px;height:26px;border-radius:50%;flex:none;
+  border:3px solid #101214;box-shadow:inset 0 0 0 3px #fff}
+.b-shot:disabled{opacity:.6}
+.chip.shot{background:var(--go);color:#04140A}
+
 /* Big primary action standing where the live preview used to sit. */
 .b-scan{background:var(--panel-2);border:1.5px solid var(--line);color:var(--ink);
   min-height:76px;font-size:18px;border-radius:18px}
@@ -158,6 +168,7 @@ img{display:block;max-width:100%}
   overscroll-behavior:contain;touch-action:pan-y;display:flex;flex-direction:column;gap:10px}
 .grab{width:38px;height:4px;border-radius:2px;background:var(--line);margin:0 auto 2px;flex:none}
 .preview{width:100%;border-radius:14px;background:#000;max-height:56dvh}
+img.preview{object-fit:contain}
 .acts{display:flex;gap:6px;flex:none}
 
 /* ─── setup stats ─── */
