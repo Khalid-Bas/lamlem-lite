@@ -2,7 +2,8 @@
 
 import { readPdfItems } from "./pdf/read-client.ts";
 import { parseOrdersFromItems } from "./pdf/orders.ts";
-import { parseLabelsFromItems } from "./pdf/labels.ts";
+import { parseLabelsFromItems, type ParsedLabel } from "./pdf/labels.ts";
+import { readLabelContents } from "./pdf/label-contents.ts";
 import { autoMatch } from "./barcode.ts";
 import { readCatalog } from "./catalog-load.ts";
 import { resolveOption } from "./options.ts";
@@ -34,6 +35,44 @@ export interface BuildStats {
   /** Line items that ended up with a photo. */
   itemsWithPhoto: number;
   catalogProducts: number;
+  /**
+   * Where the order lines came from. "labels" means the orders PDF was absent
+   * or unreadable and the boxes were reconstructed from the shipping labels,
+   * which is worth saying out loud before packing starts.
+   */
+  source: "orders-pdf" | "labels";
+  /** Label-built lines whose text could not be tied to a catalog product. */
+  unreadItems: number;
+  /** Label-built lines whose quantity is a guess rather than a figure read. */
+  approximateItems: number;
+}
+
+/**
+ * Raised when a PDF carries no text layer at all.
+ *
+ * Salla's *invoice* export draws every glyph as vector outlines, so a file
+ * that looks perfectly normal on screen yields nothing to any text extractor —
+ * not a parser bug, and no amount of fixing the parser will help. The generic
+ * "no orders found" message sent the merchant hunting; naming the real cause,
+ * and the export that does work, ends it in one read.
+ */
+export class NoTextLayerError extends Error {
+  readonly which: "orders" | "labels";
+
+  constructor(which: "orders" | "labels") {
+    super(
+      which === "orders"
+        ? "ملف الطلبات لا يحتوي على نص — صفحاته صور أو خطوط محوّلة إلى أشكال، فلا يمكن استخراج أي كلمة منه. هذا ما يحدث مع تصدير «الفواتير» من سلة؛ صدّر «تجهيز الطلبات» بدلًا منه، أو تابع بملف البوليصات وحده."
+        : "ملف البوليصات لا يحتوي على نص — صفحاته صور أو خطوط محوّلة إلى أشكال، فلا يمكن قراءته.",
+    );
+    this.name = "NoTextLayerError";
+    this.which = which;
+  }
+}
+
+/** True when not one page of the PDF yielded a single piece of text. */
+function hasNoText(pages: { str: string }[][]): boolean {
+  return pages.every((page) => page.every((it) => !it.str.trim()));
 }
 
 /**
@@ -111,8 +150,65 @@ export function linkCatalog(
   return { orders: next, linked, withPhoto };
 }
 
+/** Marks a line the label could not resolve, so the card can say so. */
+const UNMATCHED_NOTE = "لم يُطابَق مع ملف المنتجات";
+const APPROX_NOTE = "الكمية غير مؤكدة — راجع الطلب";
+
+/**
+ * Builds the orders from the shipping labels alone.
+ *
+ * Everything the packer needs is on the label: the order number, who it is
+ * going to, the barcode that will be scanned, and — in the carrier's
+ * description-of-goods field — what belongs in the box. It is a poorer source
+ * than the orders PDF (no SKUs, no variant text, quantities read off mangled
+ * bidi text) but it is a complete one, and it is what stands between an
+ * unreadable export and a wasted afternoon.
+ */
+function ordersFromLabels(labels: ParsedLabel[], products: Product[]): PackOrder[] {
+  return labels.map((label, i) => {
+    const items = readLabelContents(label.description ?? "", products);
+    const number = label.orderNumberOnLabel ?? label.trackingRaw ?? String(i + 1);
+    return {
+      id: `l${i + 1}-${number}`,
+      orderNumber: number,
+      customerName: label.recipientName,
+      city: label.city,
+      carrierName: label.carrierName,
+      carrierId: label.carrierId,
+      trackingRaw: label.trackingRaw,
+      // Only an amount the label presents as cash on delivery makes this an
+      // order to collect for. A declared value is what the goods are worth,
+      // and reading it as COD would tell the packer to take money twice.
+      paymentType: (label.codAmount ?? 0) > 0 ? ("cod" as const) : ("prepaid" as const),
+      totalAmount: label.declaredValue ?? label.codAmount,
+      items: items.map((it): PackItem => ({
+        name: it.name,
+        rawName: it.name,
+        quantity: it.quantity,
+        sku: it.sku,
+        sallaProductId: it.sallaProductId,
+        // Shown on the card in amber: a guessed quantity must never pass for a
+        // read one, and an unmatched name must look unmatched.
+        optionText: !it.resolved
+          ? UNMATCHED_NOTE
+          : it.approximate
+            ? APPROX_NOTE
+            : undefined,
+        optionVerified: false,
+      })),
+    };
+  });
+}
+
+function countNotes(orders: PackOrder[], note: string): number {
+  return orders.reduce(
+    (n, o) => n + o.items.filter((it) => it.optionText === note).length,
+    0,
+  );
+}
+
 export async function buildBatch(
-  ordersPdf: File,
+  ordersPdf: File | null,
   labelsPdf: File,
   catalogFile: File | null,
   onProgress?: (p: BuildProgress) => void,
@@ -123,17 +219,45 @@ export async function buildBatch(
     products = await readCatalog(catalogFile);
   }
 
-  onProgress?.({ stage: "قراءة ملف الطلبات", done: 0, total: 1 });
-  const orderPages = await readPdfItems(ordersPdf, (d, t) =>
-    onProgress?.({ stage: "قراءة ملف الطلبات", done: d, total: t }),
-  );
-  const parsedOrders = parseOrdersFromItems(orderPages.pages);
+  let parsedOrders: ReturnType<typeof parseOrdersFromItems> = [];
+  if (ordersPdf) {
+    onProgress?.({ stage: "قراءة ملف الطلبات", done: 0, total: 1 });
+    const orderPages = await readPdfItems(ordersPdf, (d, t) =>
+      onProgress?.({ stage: "قراءة ملف الطلبات", done: d, total: t }),
+    );
+    if (hasNoText(orderPages.pages)) throw new NoTextLayerError("orders");
+    parsedOrders = parseOrdersFromItems(orderPages.pages);
+  }
 
   onProgress?.({ stage: "قراءة ملف البوليصات", done: 0, total: 1 });
   const labelPages = await readPdfItems(labelsPdf, (d, t) =>
     onProgress?.({ stage: "قراءة ملف البوليصات", done: d, total: t }),
   );
+  if (hasNoText(labelPages.pages)) throw new NoTextLayerError("labels");
   const parsedLabels = parseLabelsFromItems(labelPages.pages);
+
+  // No orders PDF, or one that parsed to nothing: the labels carry enough to
+  // pack from, so they are used rather than refusing the whole batch.
+  if (parsedOrders.length === 0) {
+    const fromLabels = ordersFromLabels(parsedLabels, products);
+    const { orders, linked, withPhoto } = linkCatalog(fromLabels, products);
+    return {
+      batch: { createdAt: new Date().toISOString(), orders, records: [] },
+      stats: {
+        orders: orders.length,
+        labels: parsedLabels.length,
+        // Every order here *is* a label, so the match is total by construction.
+        matchedLabels: parsedLabels.length,
+        lineItems: orders.reduce((n, o) => n + o.items.length, 0),
+        linkedItems: linked,
+        itemsWithPhoto: withPhoto,
+        catalogProducts: products.length,
+        source: "labels",
+        unreadItems: countNotes(orders, UNMATCHED_NOTE),
+        approximateItems: countNotes(orders, APPROX_NOTE),
+      },
+    };
+  }
 
   const base: PackOrder[] = parsedOrders.map((o, i) => ({
     id: `o${i + 1}-${o.orderNumber}`,
@@ -184,6 +308,9 @@ export async function buildBatch(
       linkedItems: linked,
       itemsWithPhoto: withPhoto,
       catalogProducts: products.length,
+      source: "orders-pdf",
+      unreadItems: 0,
+      approximateItems: 0,
     },
   };
 }

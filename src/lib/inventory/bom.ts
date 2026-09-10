@@ -52,9 +52,14 @@ const ID_HEADERS = ["#", "المنتج", "sku"];
  * Reads the consumption matrix out of a workbook sheet given as rows of cells.
  *
  * Layout: row 0 is the header, columns 0–2 identify the product, and every
- * column after that is one component. The same component may appear in more
- * than one column — the sheet has «استكر شيت من تصميم قوت (قهوة)» twice — so
- * columns sharing a name are summed rather than one shadowing the other.
+ * column after that is one component.
+ *
+ * The same component appears in more than one column — «استكر شيت من تصميم
+ * قوت (قهوة)» twice, «ويسك وملعقتين خشبية» twice — because columns get added
+ * over time without checking whether the item already had one. Those columns
+ * name the same physical thing, so a row carrying a figure in both is stating
+ * one requirement twice, not two separate ones: the larger figure wins rather
+ * than the two being added. Adding them made selling one whisk set consume two.
  */
 export function parseBom(rows: unknown[][]): Bom {
   if (rows.length < 2) return { rows: [], components: [] };
@@ -83,7 +88,7 @@ export function parseBom(rows: unknown[][]): Bom {
       if (!label) continue;
       const qty = Number(row[c]);
       if (!Number.isFinite(qty) || qty <= 0) continue;
-      byName.set(label, (byName.get(label) ?? 0) + qty);
+      byName.set(label, Math.max(byName.get(label) ?? 0, qty));
     }
 
     // "بكج الجمعات - اسود/مشروب اوتسايد" is one variant of one product, while

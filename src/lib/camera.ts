@@ -1,19 +1,19 @@
 "use client";
 
 /**
- * One camera, two jobs.
+ * One camera, two jobs: reading barcodes and taking the packing photo.
  *
- * The packer points the phone at a label to scan it, then at the bench to
- * record packing, then back at the next label. Opening the camera twice would
- * fail on Android (the device is single-claim), so a single MediaStream is
- * opened once and shared: a <video> element renders it for barcode detection,
- * and a MediaRecorder writes the same stream to a file.
+ * Opening the camera twice would fail on Android — the device is single-claim
+ * — so a single MediaStream is opened once and shared. The same <video> that
+ * the detector reads frames from is the viewfinder the shot is framed in.
  *
- * That also means detection keeps running *during* recording, which is what
- * makes "scan the next order to finish this one" work without any button.
+ * The stream does not survive the phone going away. Locking the screen, taking
+ * a call, or switching apps ends or mutes the camera track, and Chrome does
+ * not restore it: the element keeps a dead stream and renders black forever,
+ * which is why this class watches for coming back and re-acquires by itself.
  */
 
-import { QUALITY, type VideoQuality } from "./settings.ts";
+import { QUALITY, type PhotoQuality } from "./settings.ts";
 
 export type BarcodeHandler = (value: string) => void;
 
@@ -62,8 +62,6 @@ export function canScan(): boolean {
 
 export class Camera {
   private stream: MediaStream | null = null;
-  private recorder: MediaRecorder | null = null;
-  private chunks: Blob[] = [];
   private detector: BarcodeDetectorLike | null = null;
   private timer: ReturnType<typeof setTimeout> | 0 = 0;
   private scanning = false;
@@ -71,21 +69,138 @@ export class Camera {
   private session = 0;
   /** Codes seen recently, so one physical label is not read ten times a second. */
   private cooldown = new Map<string, number>();
+  /** Set while a recovery is in flight, so overlapping events do not stack. */
+  private reviving = false;
+  private onCodeHandler: BarcodeHandler | null = null;
+  private cooldownMs = 2500;
+  /** Told when the preview recovers or gives up, so the UI can say so. */
+  private onStateChange?: (state: "live" | "recovering" | "lost") => void;
+  private detached: (() => void)[] = [];
 
   video: HTMLVideoElement;
-  private quality: VideoQuality;
+  private quality: PhotoQuality;
 
-  constructor(video: HTMLVideoElement, quality: VideoQuality = "high") {
+  constructor(video: HTMLVideoElement, quality: PhotoQuality = "high") {
     this.video = video;
     this.quality = quality;
+    this.watchForReturn();
+  }
+
+  /** Changes capture resolution. Takes effect the next time the camera starts. */
+  setQuality(q: PhotoQuality): void {
+    this.quality = q;
+  }
+
+  onState(fn: (state: "live" | "recovering" | "lost") => void): void {
+    this.onStateChange = fn;
   }
 
   /**
-   * Changes capture quality. Takes effect the next time the camera starts, so
-   * a recording already in progress is never disturbed mid-order.
+   * Watches every signal that the page has come back from being away.
+   *
+   * Android gives no single reliable one: `visibilitychange` fires for a
+   * screen lock and an app switch, `pageshow` for a restore from the back
+   * forward cache, `focus` for returning from a permission dialog, and a phone
+   * call can end the camera track without any of them. All four are listened
+   * to, plus the track's own `ended` and `mute` events, and they all funnel
+   * into the same idempotent recovery.
    */
-  setQuality(q: VideoQuality): void {
-    this.quality = q;
+  private watchForReturn(): void {
+    if (typeof document === "undefined") return;
+    const wake = () => {
+      if (document.visibilityState === "visible") void this.revive();
+    };
+    const on = (target: EventTarget, type: string) => {
+      target.addEventListener(type, wake);
+      this.detached.push(() => target.removeEventListener(type, wake));
+    };
+    on(document, "visibilitychange");
+    on(window, "pageshow");
+    on(window, "focus");
+    // Chrome's freeze/resume pair for discarded background tabs.
+    on(document, "resume");
+  }
+
+  /**
+   * Brings the preview back after the phone was locked, called, or switched
+   * away from.
+   *
+   * Cheap checks first: a stream whose track is still live usually only needs
+   * `play()` again. Anything worse is repaired by throwing the stream away and
+   * asking for a new one — the element cannot be talked out of a dead track,
+   * which is exactly the black preview that used to need a page reload.
+   */
+  async revive(): Promise<void> {
+    if (!this.stream || this.reviving) return;
+    this.reviving = true;
+    try {
+      const track = this.stream.getVideoTracks()[0];
+      // A track muted by a phone call stays "live" and the element keeps
+      // showing the last frame it got, so neither the track state nor the
+      // element's dimensions reveal the failure. Give the OS a moment to hand
+      // the camera back, then treat a still-muted track as dead.
+      if (track?.muted) await new Promise((r) => setTimeout(r, 500));
+      const dead = !track || track.readyState === "ended" || track.muted;
+
+      if (!dead) {
+        if (this.video.srcObject !== this.stream) this.video.srcObject = this.stream;
+        await this.video.play().catch(() => {});
+        // A track can report "live" while delivering nothing — muted by the
+        // call that just ended, or simply not resumed. Frames are the only
+        // honest test, so wait a beat and look at the element itself.
+        await new Promise((r) => setTimeout(r, 350));
+        if (this.hasFrames()) {
+          this.onStateChange?.("live");
+          return;
+        }
+      }
+
+      this.onStateChange?.("recovering");
+      await this.reacquire();
+    } finally {
+      this.reviving = false;
+    }
+  }
+
+  /** True when the element is actually receiving pictures. */
+  private hasFrames(): boolean {
+    return (
+      this.video.readyState >= 2 &&
+      this.video.videoWidth > 0 &&
+      !this.video.paused
+    );
+  }
+
+  /**
+   * Drops the stream and opens a fresh one, restoring scanning if it was on.
+   *
+   * Retried a few times: coming back from a phone call, the camera can still
+   * be held by the dialer for a moment and `getUserMedia` rejects outright.
+   */
+  private async reacquire(): Promise<void> {
+    const wasScanning = this.scanning;
+    const handler = this.onCodeHandler;
+    const cooldownMs = this.cooldownMs;
+
+    this.stopScanning();
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+    this.video.srcObject = null;
+
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        await this.start();
+        if (this.hasFrames() || this.video.readyState >= 2) {
+          if (wasScanning && handler) this.startScanning(handler, cooldownMs);
+          this.onStateChange?.("live");
+          return;
+        }
+      } catch {
+        // Camera still held elsewhere; back off and try again.
+      }
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+    this.onStateChange?.("lost");
   }
 
   /**
@@ -117,13 +232,12 @@ export class Camera {
     }
     const q = QUALITY[this.quality];
     this.stream = await navigator.mediaDevices.getUserMedia({
-      // Rear camera. Resolution follows the quality setting: the recording has
-      // to be legible enough to read a shipping label back, which 720p was not.
+      // Rear camera. Resolution follows the quality setting: the photo has to
+      // be legible enough to read a shipping label back off, which 720p was not.
       video: {
         facingMode: { ideal: "environment" },
         width: { ideal: q.width },
         height: { ideal: q.height },
-        frameRate: { ideal: q.fps, max: 30 },
       },
       audio: false,
     });
@@ -131,17 +245,39 @@ export class Camera {
     this.video.setAttribute("playsinline", "true");
     this.video.muted = true;
     await this.video.play();
+    this.watchTrack();
 
     const Ctor = detectorCtor();
     if (Ctor) this.detector = new Ctor({ formats: FORMATS });
   }
 
+  /**
+   * A camera track that ends or goes muted is the failure this class exists to
+   * survive, and it often fires with no page-level event alongside it.
+   */
+  private watchTrack(): void {
+    const track = this.stream?.getVideoTracks()[0];
+    if (!track) return;
+    const wake = () => {
+      if (document.visibilityState === "visible") void this.revive();
+    };
+    track.addEventListener("ended", wake);
+    track.addEventListener("mute", wake);
+    track.addEventListener("unmute", wake);
+  }
+
   stop(): void {
     this.stopScanning();
-    this.recorder?.state === "recording" && this.recorder.stop();
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = null;
     this.video.srcObject = null;
+  }
+
+  /** Releases the page-level listeners. Call when the camera is discarded. */
+  dispose(): void {
+    this.stop();
+    this.detached.forEach((off) => off());
+    this.detached = [];
   }
 
   /**
@@ -151,6 +287,10 @@ export class Camera {
   startScanning(onCode: BarcodeHandler, cooldownMs = 2500): void {
     if (!this.detector || this.scanning) return;
     this.scanning = true;
+    // Remembered so a recovery can put detection back exactly as it was; the
+    // scanner is usually the screen you are on when the phone rings.
+    this.onCodeHandler = onCode;
+    this.cooldownMs = cooldownMs;
     const session = ++this.session;
 
     const tick = async () => {
@@ -188,6 +328,7 @@ export class Camera {
 
   stopScanning(): void {
     this.scanning = false;
+    this.onCodeHandler = null;
     // Bumping the session invalidates any in-flight detection, so a promise
     // that resolves after this call cannot deliver a code.
     this.session++;
@@ -244,55 +385,5 @@ export class Camera {
     return new Promise((resolve) =>
       canvas.toBlob((b) => resolve(b), "image/jpeg", quality),
     );
-  }
-
-  private static mimeType(): string {
-    const candidates = [
-      "video/webm;codecs=vp9",
-      "video/webm;codecs=vp8",
-      "video/webm",
-      "video/mp4",
-    ];
-    return (
-      candidates.find((t) => MediaRecorder.isTypeSupported?.(t)) ?? "video/webm"
-    );
-  }
-
-  startRecording(): void {
-    if (!this.stream || this.recorder?.state === "recording") return;
-    this.chunks = [];
-    this.recorder = new MediaRecorder(this.stream, {
-      mimeType: Camera.mimeType(),
-      // Bitrate follows the quality setting. The old flat 1.5 Mbps was too low
-      // to read printed text back off a label, which is the main reason these
-      // recordings exist.
-      videoBitsPerSecond: QUALITY[this.quality].bitrate,
-    });
-    this.recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) this.chunks.push(e.data);
-    };
-    this.recorder.start(1000);
-  }
-
-  /** Stops recording and resolves with the finished clip. */
-  stopRecording(): Promise<Blob | null> {
-    return new Promise((resolve) => {
-      const rec = this.recorder;
-      if (!rec || rec.state !== "recording") {
-        resolve(null);
-        return;
-      }
-      rec.onstop = () => {
-        const blob = new Blob(this.chunks, { type: rec.mimeType });
-        this.chunks = [];
-        this.recorder = null;
-        resolve(blob.size > 0 ? blob : null);
-      };
-      rec.stop();
-    });
-  }
-
-  get isRecording(): boolean {
-    return this.recorder?.state === "recording";
   }
 }

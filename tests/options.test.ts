@@ -283,3 +283,46 @@ test("derives the carrier tag from the name when the id is missing", () => {
   assert.equal(carrierCode([{ carrierId: "smsa", carrierName: "سمسا" }]), "SMSA");
   assert.equal(carrierCode([{ carrierName: "لا أحد" }]), "");
 });
+
+/* ── the share sheet will not take forty files at once ── */
+import { shareBatches, shortDay } from "../src/lib/drive.ts";
+
+const fakeFile = (name: string, size: number): File =>
+  new File([new Uint8Array(size)], name, { type: "image/jpeg" });
+
+test("splits a share into sets the browser will accept", () => {
+  // Regression: ten photos shared fine and forty were refused outright, which
+  // surfaced as "لا يدعم المشاركة" rather than as a limit.
+  const files = Array.from({ length: 40 }, (_, i) => fakeFile(`${i}.jpg`, 1024));
+  const batches = shareBatches(files);
+  assert.equal(batches.length, 4);
+  assert.deepEqual(batches.map((b) => b.length), [10, 10, 10, 10]);
+  assert.equal(batches.flat().length, 40, "every file is still shared");
+});
+
+test("splits on total size too, not just on count", () => {
+  const files = Array.from({ length: 6 }, (_, i) => fakeFile(`${i}.jpg`, 20 * 1024 * 1024));
+  const batches = shareBatches(files);
+  assert.ok(batches.length >= 3, `got ${batches.length}`);
+  assert.equal(batches.flat().length, 6);
+  for (const b of batches) {
+    const bytes = b.reduce((n, f) => n + f.size, 0);
+    assert.ok(bytes <= 45 * 1024 * 1024 || b.length === 1, `batch of ${bytes} bytes`);
+  }
+});
+
+test("one oversized file still goes, alone, rather than being dropped", () => {
+  const batches = shareBatches([fakeFile("huge.jpg", 80 * 1024 * 1024)]);
+  assert.deepEqual(batches.map((b) => b.length), [1]);
+});
+
+test("a small set is one batch and one tap", () => {
+  assert.equal(shareBatches([fakeFile("a.jpg", 10)]).length, 1);
+  assert.equal(shareBatches([]).length, 0);
+});
+
+/* ── file names say the day the way a person does ── */
+test("writes the day short, without the year", () => {
+  assert.equal(shortDay(new Date(2026, 8, 10)), "10 Sep");
+  assert.equal(shortDay(new Date(2026, 0, 3)), "3 Jan");
+});

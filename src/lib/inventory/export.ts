@@ -1,6 +1,6 @@
 "use client";
 
-import { dayFolderName, safeFileName } from "../drive.ts";
+import { dayFolderName, shortDay, safeFileName } from "../drive.ts";
 import type { PackOrder } from "../types.ts";
 import type { Bom } from "./bom.ts";
 import { tally } from "./tally.ts";
@@ -111,7 +111,11 @@ export async function buildInventoryWorkbook(
     blob: new Blob([out], {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }),
-    fileName: `${safeFileName(`جرد الكميات - ${t.orderCount} طلب - ${dayFolderName(when)}`)}.xlsx`,
+    // "جرد الكميات - 10 Sep - 35 طلب - 9 منتج" — the date first because that is
+    // how a folder of these sorts and how the merchant looks for one.
+    fileName: `${safeFileName(
+      `جرد الكميات - ${shortDay(when)} - ${t.orderCount} طلب - ${t.sold.length} منتج`,
+    )}.xlsx`,
     unresolved: t.unresolved.map((s) => `${s.name}${s.option ? ` (${s.option})` : ""}`),
     soldCount: t.sold.length,
     componentCount: t.components.length,

@@ -3,18 +3,19 @@
 /**
  * On-device storage. No server, no account, no network.
  *
- * Videos are the reason this is IndexedDB rather than localStorage: a few
- * minutes of 720p is megabytes, far past the ~5 MB string quota, and Blobs are
+ * Photos are the reason this is IndexedDB rather than localStorage: a batch of
+ * full-resolution shots is far past the ~5 MB string quota, and Blobs are
  * stored natively here without base64 inflating them by a third.
  */
 
 import type { Batch, PackRecord } from "./types.ts";
 
 const DB_NAME = "lamlem-lite";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_STATE = "state";
-const STORE_VIDEOS = "videos";
 const STORE_PHOTOS = "photos";
+/** Clips from before video was dropped; deleted on upgrade to free the space. */
+const STORE_VIDEOS = "videos";
 
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -22,8 +23,10 @@ function open(): Promise<IDBDatabase> {
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_STATE)) db.createObjectStore(STORE_STATE);
-      if (!db.objectStoreNames.contains(STORE_VIDEOS)) db.createObjectStore(STORE_VIDEOS);
       if (!db.objectStoreNames.contains(STORE_PHOTOS)) db.createObjectStore(STORE_PHOTOS);
+      // Video is gone. Old clips are megabytes each and nothing can play them
+      // any more, so the upgrade reclaims that space rather than orphaning it.
+      if (db.objectStoreNames.contains(STORE_VIDEOS)) db.deleteObjectStore(STORE_VIDEOS);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -55,18 +58,8 @@ export const loadBatch = () =>
 
 export const clearAll = async () => {
   await tx(STORE_STATE, "readwrite", (s) => s.clear());
-  await tx(STORE_VIDEOS, "readwrite", (s) => s.clear());
   await tx(STORE_PHOTOS, "readwrite", (s) => s.clear());
 };
-
-export const saveVideo = (orderId: string, blob: Blob) =>
-  tx(STORE_VIDEOS, "readwrite", (s) => s.put(blob, orderId));
-
-export const loadVideo = (orderId: string) =>
-  tx<Blob | undefined>(STORE_VIDEOS, "readonly", (s) => s.get(orderId));
-
-export const deleteVideo = (orderId: string) =>
-  tx(STORE_VIDEOS, "readwrite", (s) => s.delete(orderId));
 
 /**
  * Photos live in their own store, keyed by order id.
@@ -88,13 +81,6 @@ export async function usage(): Promise<{ used: number; quota: number } | null> {
   if (!navigator.storage?.estimate) return null;
   const e = await navigator.storage.estimate();
   return { used: e.usage ?? 0, quota: e.quota ?? 0 };
-}
-
-export function formatDuration(ms: number): string {
-  const total = Math.round(ms / 1000);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export function formatBytes(n: number): string {

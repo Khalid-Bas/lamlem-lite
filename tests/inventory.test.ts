@@ -22,9 +22,11 @@ const ord = (id: string, items: Partial<PackItem>[]): PackOrder => ({
 
 /* ── reading the matrix ── */
 
-test("sums columns that repeat the same component", () => {
-  // The real sheet lists «استكر شيت من تصميم قوت (قهوة)» in two columns; one
-  // must not shadow the other.
+test("columns repeating a component state it once, not twice over", () => {
+  // The real sheet lists «استكر شيت من تصميم قوت (قهوة)» in two columns and
+  // «ويسك وملعقتين خشبية» in two more, because a column gets added without
+  // anyone checking the item already had one. Adding them made selling one
+  // whisk set consume two, so the larger figure wins instead.
   const bom = parseBom([
     ["#", "المنتج", "SKU", "كرتون", "استكر", "استكر"],
     [1, "بكج", "A1", 1, 2, 3],
@@ -32,9 +34,27 @@ test("sums columns that repeat the same component", () => {
   assert.equal(bom.rows.length, 1);
   assert.deepEqual(bom.rows[0].components, [
     { name: "كرتون", qty: 1 },
-    { name: "استكر", qty: 5 },
+    { name: "استكر", qty: 3 },
   ]);
   assert.deepEqual(bom.components, ["كرتون", "استكر"]);
+});
+
+test("a product duplicated across both whisk columns still consumes one", () => {
+  // Regression against the merchant's own sheet, where the standalone whisk
+  // row carries a 1 in each of the two columns naming that same whisk set.
+  const whisk = DEFAULT_BOM.rows.find((r) => r.sku === "00031");
+  assert.deepEqual(whisk?.components, [{ name: "ويسك وملعقتين خشبية", qty: 1 }]);
+});
+
+test("the whisk set added to the bundles is counted once per bundle", () => {
+  const t = tally(
+    [ord("1", [{ name: "بكج الماتشا", sku: "00055", quantity: 3 }])],
+    DEFAULT_BOM,
+  );
+  assert.equal(
+    t.components.find((c) => c.name === "ويسك وملعقتين خشبية")?.quantity,
+    3,
+  );
 });
 
 test("ignores blank cells, zeros and rows with no product", () => {

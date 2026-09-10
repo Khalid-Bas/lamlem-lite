@@ -30,30 +30,21 @@ export interface PackOrder {
   items: PackItem[];
 }
 
+/**
+ * One packed order: its photo and when it was taken.
+ *
+ * A photo always belongs to exactly one order — that is the point of the mode
+ * — so even a group session leaves one record and one file per box.
+ */
 export interface PackRecord {
   orderId: string;
-  /** Milliseconds from scan-in to scan-out. */
-  durationMs: number;
   packedAt: string;
-  hasVideo: boolean;
-  videoBytes?: number;
-  /**
-   * Set when the order was captured as a still photo instead of a video. A
-   * photo always belongs to exactly one order — that is the point of the mode
-   * — so unlike a group clip it is never shared between records.
-   */
-  hasPhoto?: boolean;
+  hasPhoto: boolean;
   photoBytes?: number;
   /**
-   * Key the clip is stored under. Normally the order's own id, but a group
-   * session points several orders at one shared recording.
+   * True once the label on the sealed box was scanned. In the photo flow that
+   * scan is what opens the shutter screen, so it is always true here.
    */
-  videoKey?: string;
-  /** Set when this order was packed as part of a multi-order session. */
-  groupId?: string;
-  /** Orders that share this order's video, including itself. */
-  groupSize?: number;
-  /** True once the packer re-scanned the label to confirm the box. */
   verified?: boolean;
 }
 

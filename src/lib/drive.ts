@@ -43,9 +43,21 @@ export function targetFolderId(configured?: string): string | undefined {
 }
 
 /** "26 Aug 2026" — the day the batch was filmed. */
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
 export function dayFolderName(when: Date): string {
-  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  return `${when.getDate()} ${months[when.getMonth()]} ${when.getFullYear()}`;
+  return `${when.getDate()} ${MONTHS[when.getMonth()]} ${when.getFullYear()}`;
+}
+
+/**
+ * The date as a person says it out loud — "10 Sep".
+ *
+ * Used in file names, where the year is noise: everything in a batch is from
+ * the same week, and the short form leaves room for the figures that actually
+ * tell one stocktake from another.
+ */
+export function shortDay(when: Date): string {
+  return `${when.getDate()} ${MONTHS[when.getMonth()]}`;
 }
 
 interface TokenResponse {
@@ -313,6 +325,43 @@ export function canShareFiles(files: File[]): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * How many files to hand the share sheet at once.
+ *
+ * Chrome on Android quietly refuses a large share: `canShare` returns false
+ * once the set is past its limit, and forty photos hit it every time while ten
+ * went through. There is no way to raise the ceiling from a web page, so the
+ * set is walked through in batches instead, each one its own tap. The cap is
+ * on total bytes as well as on count, because the real limit is payload size
+ * and full-resolution photos vary enormously.
+ */
+export const SHARE_MAX_FILES = 10;
+export const SHARE_MAX_BYTES = 45 * 1024 * 1024;
+
+/** Splits files into sets the share sheet will actually accept. */
+export function shareBatches(
+  files: File[],
+  maxFiles = SHARE_MAX_FILES,
+  maxBytes = SHARE_MAX_BYTES,
+): File[][] {
+  const out: File[][] = [];
+  let current: File[] = [];
+  let bytes = 0;
+  for (const f of files) {
+    // A single file over the cap still goes on its own — refusing it outright
+    // would silently drop a photo the packer believes they have shared.
+    if (current.length > 0 && (current.length >= maxFiles || bytes + f.size > maxBytes)) {
+      out.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(f);
+    bytes += f.size;
+  }
+  if (current.length) out.push(current);
+  return out;
 }
 
 export async function shareFiles(files: File[], title: string): Promise<void> {

@@ -2,9 +2,9 @@
 
 A single-screen packing tool for one person with a phone.
 
-Upload the two PDFs (plus the product Excel for photos) → scan a shipping label
-with the phone camera → see exactly what goes in the box → the packing is
-recorded → scan the next label → the video and the elapsed time are saved.
+Upload the shipping-label PDF (plus the product Excel for photos) → pack the
+box → scan its label with the phone camera → see exactly what should be inside
+→ photograph the sealed box → the photo is filed under that order number.
 
 Everything runs on the phone. No server, no account, no database, and none of
 your customer data leaves the device.
@@ -15,45 +15,72 @@ your customer data leaves the device.
 
 | | |
 |---|---|
-| **Setup** (once per batch) | Pick `Prep Orders.pdf`, `polices.pdf`, and the product list (`.xlsx` or `.csv`). Parsed on-device in a few seconds, then a summary shows how many orders, labels and photos were resolved — check this before packing. |
-| **Scan** | Tap **مسح الباركود**. The camera opens only for the scan, then closes. Counter at the top reads `3 / 30`. |
-| **Pack** | Large product photos with quantities. Recording starts automatically; a timer runs. The camera preview is hidden — the scan button sits in its place. |
-| **Next** | Tap **مسح الباركود** and scan the next label: the current order is saved and the new one starts in one move. Or tap **تم** to just finish. |
-| **Group** | **تجهيز مجموعة طلبات** — scan several labels, pack them together, then re-scan each label to confirm. **The recording runs through the whole session, verification included**, so the confirming scan of every sealed box is on film. All of them are marked done and share one clip. |
-| **Summary** | Per-order time, customer name, video size, **مشاهدة** to preview in place, **حفظ** to download, and **رفع … فيديو إلى Drive** — available at any time, not only once the batch is finished. |
-| **Photo instead of video** | **تصوير الطلبات** — pack first, then scan the sealed box and photograph it. One photo per order, named after the order number. |
+| **Setup** (once per batch) | Pick the **تجهيز الطلبات** PDF (optional), `polices.pdf`, and the product list (`.xlsx` or `.csv`). Parsed on-device in a few seconds, then a summary shows how many orders, labels and photos were resolved — check this before packing. |
+| **Pack, then shoot** | Pack the box first. Then **تصوير طلب واحد** or **تصوير مجموعة طلبات** — one tap, straight to the camera. |
+| **Scan** | Scan the label on the sealed box. The order appears over a live viewfinder so the contents can be checked one last time. |
+| **Shoot** | Tap the shutter. The photo is saved as `SMSA - 276451900.jpg` — carrier, then order number. Group mode goes straight back to the scanner for the next box. |
+| **Summary** | Customer name, time, photo size, **عرض** to look at one in place, **حفظ** to download, and **أرسل … + الجرد إلى Drive** — available at any time, not only once the batch is finished. |
 | **Stocktake** | **جرد الكميات (Excel)** — one workbook, two sheets: what sold, and every carton, cup, sticker and tin that sale consumed. |
 
 Tapping an order in **الطلبات** opens a **read-only preview** — items, photos,
-quantities — and never touches the camera. Recording starts only from the
-explicit **ابدأ التعبئة والتسجيل** button inside it. If another order is already
-being packed the button says so and asks first; the running recording keeps
-going while you look. Previewing an order that is already done offers
-**إعادة التعبئة والتسجيل**, which warns that the stored video will be replaced.
+quantities — and never touches the camera. **صوّر هذا الطلب** inside it goes
+straight to the shutter for that one box, skipping the scan, for when a label
+will not read. An order that already has a photo offers to replace it, and says
+so first.
 
-The moment a label joins a group — scanned or tapped in by hand — the app
-compares what every selected order actually contains — product, chosen variant and quantity — and stops on a full
-red screen if one differs, naming the exact reason: *صنف إضافي: ملعقة ماتشا*,
-*عدد الأصناف 2 بدل 1*, *الكمية 3 بدل 1*. Continuing is deliberate; cancelling
-returns to the home screen with nothing recorded. Packing several boxes from one
-pile only works when they hold the same thing, and this is where that goes wrong.
+## Which Salla export to use
 
-## Photographing orders instead of filming them
+Use **تجهيز الطلبات**, not **الفواتير**. Salla's invoice export draws every
+glyph as vector outlines, so the file looks perfectly normal on screen but
+carries **no text layer at all** — nothing can be extracted from it by any
+tool, and no parser change can help. The app now says exactly that instead of
+"we did not recognise any order", which sent people hunting for a bug that was
+never in the code.
 
-**تصوير الطلبات (صورة بدل فيديو)** on the home screen asks one question first —
-**طلب واحد** or **مجموعة طلبات** — and then runs the opposite way round from the
-video flow: you pack first, and the camera comes out at the end.
+### Packing from the labels alone
+
+The orders PDF is therefore **optional**. Every carrier prints the order's
+contents on the label itself, in the description-of-goods field —
+*بكج الماتشا (1) ،بكج القهوة مع مق (1)* — so **تابع بملف البوليصات وحده**
+rebuilds the whole batch from `polices.pdf`: order number, customer, city,
+tracking barcode, carrier, and what goes in the box.
+
+That text arrives mangled. It is the smallest type on the label, it mixes
+Arabic with Latin runs, and the bidi reordering leaves brackets mirrored and
+the odd token out of place — *شاي ماتشا (150g (1*, *بكج ال (1) 99*. So the
+names are never trusted as strings: each line is matched against the product
+catalog **by token**, which survives all of it, and the quantity is whatever
+number is left once the product name has been accounted for — which is why the
+150 in `150g` is never read as a quantity. Where a token has been thrown across
+a separator the whole description is matched as one run instead.
+
+Anything that cannot be tied to a catalog product is **named on the setup
+screen and flagged in amber on the order card**, never quietly dropped, and the
+same goes for a quantity that had to be guessed. The setup screen also says
+plainly that the batch came from the labels rather than the orders file.
+
+A declared value (`DV:SAR 203.97`) is **not** money to collect. SMSA prints the
+COD amount under a `COD/SAR` heading rather than inline, so the old pattern
+never matched and the declared value was used instead — which would have told
+the packer to collect for an order that was already paid. The heading's own
+line is read now.
+
+## Photographing the packed box
+
+Two buttons on the home screen, each one tap from the camera: **تصوير طلب
+واحد** and **تصوير مجموعة طلبات**. There is no video anywhere in the app — you
+pack first, and the camera comes out at the end.
 
 1. Scan the label on the box you have just finished.
 2. The order appears over a live viewfinder, so the contents can be checked one
    last time against what is in front of you.
-3. Tap the shutter. The photo is saved as **`SMSA - 276451900.jpg`** — carrier
-   then order number, the same naming the clips use.
+3. Tap the shutter. The photo is saved as **`SMSA - 283255858.jpg`** — carrier,
+   then order number.
 
-**طلب واحد** stops there. **مجموعة طلبات** goes straight back to the scanner for
-the next box: scan, shoot, scan, shoot. **Every order still gets its own photo
-under its own number** — a group session shares a video, but never a photo,
-because a picture of one box is only evidence for that box.
+**طلب واحد** stops there and returns home. **مجموعة طلبات** goes straight back
+to the scanner for the next box: scan, shoot, scan, shoot, with a running count
+in the header. **Every order gets its own photo under its own number** — a
+picture of one box is only evidence for that box.
 
 In a group session the first order scanned sets what the session is, and every
 later scan is held to it. Anything that differs stops the flow *before* the
@@ -61,14 +88,9 @@ shutter screen opens and names the reason — *صنف إضافي: ملعقة م�
 *الكمية 3 بدل 1* — offering **تخطَّ هذا الطلب** or **صوّره رغم الاختلاف**. The
 manual picker runs the same check, so choosing a box by hand cannot slip past it.
 
-Because the label is scanned on the sealed box moments before the shot, a photo
-record is marked **✓ تحقّق** on the spot; there is no second confirming scan to
-do. Photos carry no duration — the packing happened before the scan — so the
-summary shows **—** in place of a time and counts them separately.
-
-Photos sit alongside clips everywhere else: **عرض** to look at one in place,
-**حفظ** to download, **مشاركة**, and both the share sheet and the Drive upload
-send them with the videos. **دفعة جديدة** deletes them along with everything else.
+In **الملخص**: **عرض** to look at a photo in place, **حفظ** to download it, and
+one button that sends every photo *and* the stocktake workbook to Drive.
+**دفعة جديدة** deletes them all.
 
 ## جرد الكميات — the stocktake
 
@@ -109,21 +131,31 @@ Anything the sheet cannot cost is **named on screen and marked in the
 ملاحظة column** rather than silently dropped — a missing product, or one whose
 row has no components filled in yet.
 
-Scanning is **only** active while the scanner is on screen. During packing the
-detector is off, so a label lying on the bench cannot end the order or restart
-the recording.
+Scanning is **only** active while the scanner is on screen. Once a shot is
+being framed the detector is off, so a label lying on the bench cannot jump to
+a different order.
 
 **الإعدادات** (on the main screen) holds: read the order aloud when a label
-scans, ask for a confirming re-scan after each order, the stocktake sheet, the
-Drive credentials, and video quality. Four presets, all at 30fps: **فائقة** 1440p/9 Mbps (~67 MB/min),
-**عالية** 1080p/7 Mbps (~52 MB/min, the default), **متوازنة** 1080p/4 Mbps
-(~30 MB/min) and **موفّرة** 720p/2.5 Mbps (~19 MB/min). 1440p is the setting
-to reach for when a label has to be readable in the recording.
+scans, the stocktake sheet, the Drive credentials, and photo resolution —
+**فائقة** 1440p, **عالية** 1080p (the default), **متوازنة** 900p and
+**موفّرة** 720p. On a phone that supports `ImageCapture` the shot is taken at
+the sensor's own photo resolution and this governs the viewfinder only.
 
-After an order is finished, the app asks for a confirming re-scan of the sealed
-box. Scanning the wrong label says which order it actually belongs to and keeps
-waiting; scanning the right one stamps the record with ✓ تحقّق in the summary.
-It can be skipped per-order, or switched off entirely.
+Because the label is scanned on the sealed box moments before the shot, every
+photo record is stamped **✓ تحقّق** on the spot — there is no separate
+confirming scan to do.
+
+### The camera comes back by itself
+
+Locking the screen, taking a call, or switching apps ends or mutes the camera
+track, and Chrome does not restore it: the element keeps a dead stream and the
+preview stays black until the page is reloaded. The camera now watches for
+`visibilitychange`, `pageshow`, `focus`, and the track's own `ended`/`mute`
+events, and repairs itself — playing again if the track survived, and throwing
+the stream away and asking for a new one if it did not, retried a few times
+because the dialer can still be holding the camera for a moment after a call.
+The shutter is disabled and the screen says *جارٍ إعادة تشغيل الكاميرا…* while
+that happens, so a shot is never taken of a frozen frame.
 
 The Android back button closes whatever is on top — scanner, preview, sheet —
 innermost first, and only offers to leave the app when nothing is open.
@@ -142,7 +174,7 @@ Everything is resumable: close the app mid-batch and it reopens where you left o
 
 ## Deploying to Vercel
 
-The camera and video recording **require HTTPS**, so this has to be deployed
+The camera **requires HTTPS**, so this has to be deployed
 (or run behind an HTTPS tunnel) — `http://localhost` on a phone will not get
 camera permission.
 
@@ -154,17 +186,31 @@ Push to GitHub, then import at [vercel.com/new](https://vercel.com/new) and set
 the **Root Directory to `lamlem-lite`**. No environment variables, no database,
 nothing to configure.
 
-## Getting videos into Drive
+## Getting photos into Drive
 
-**أرسل … فيديو إلى Drive** in **الملخص** needs no setup. It hands the clips to
-Android's share sheet, where Drive is a target using the Google account the
-phone is already signed in to. Individual clips also get a **مشاركة** button.
+**أرسل … صورة + الجرد إلى Drive** in **الملخص** needs no setup. It hands the
+photos — **and the stocktake workbook** — to Android's share sheet, where Drive
+is a target using the Google account the phone is already signed in to. The
+figures and the evidence for them land in the same place, on the same trip.
 
-The clips are wrapped up *when the summary opens*, not when the button is
+The files are wrapped up *when the summary opens*, not when the button is
 tapped. `navigator.share()` only works while the browser still counts the tap
 as active — roughly a second — and reading tens of megabytes out of storage
 inside the handler blew past that every time, which is what produced
 *"تعذّرت المشاركة"*.
+
+### Why a big share is sent in batches
+
+Ten photos shared fine and forty were refused outright. That is Chrome, not
+this app: `navigator.canShare()` returns false once the set is past its limit,
+and the limit is on payload size as well as count. There is no way to raise it
+from a web page, so a large set is split into batches of **10 files / 45 MB**
+and the button becomes **تابع المشاركة (2 من 4)** after each one. Every batch
+is its own tap, which is what keeps the browser's user-activation check happy,
+and nothing is dropped — cancel halfway and the queue is still there to resume.
+
+The direct Drive upload below has no such limit and sends everything, photos
+and stocktake, in one go.
 
 ### Unattended upload into your own Drive folder
 
@@ -174,8 +220,10 @@ it), then **اختبر الاتصال** proves it end to end by creating today's
 Both are stored on the device, so changing them needs no redeploy. The screen
 shows the exact origin to authorise in Google Cloud.
 
-Uploads land in a dated folder — **26 Aug 2026** — inside the folder you named,
-with the CSV manifest alongside.
+Uploads land in a dated folder — **10 Sep 2026** — inside the folder you named:
+every photo, the **جرد الكميات** workbook, and a `… - الملخّص.csv` manifest
+listing each order, its customer and which file it is in, so a shared photo can
+still be traced back.
 
 Creating that OAuth client in Google Cloud is the one step that cannot be
 removed. Google will not let a page write to your Drive merely because Chrome
@@ -183,16 +231,10 @@ is signed in, and a credential shipped inside the app to fake it would be
 readable by anyone who opened the page — so that is not something to build. The
 share-sheet route above stays available and needs nothing at all.
 
-A group session produces **one** clip covering all its orders, so the summary
-lists it as a single row and offers a single **حفظ** — there is no need to
-download the same file once per order. Filenames lead with the carrier — `SMSA - 2562445625.webm`,
-`DN - 25556554 - 26554852.webm`, and `MIX` when a group spans two couriers — so
-a folder of clips sorts by courier at a glance. A group clip lists every order
-number it covers, trimmed with a count if
-a session is long enough to exceed the 255-character filename limit. The same
-name is used whether you save to the phone or upload. Alongside the videos it writes a
-`… - الملخّص.csv` manifest listing every order, its customer, duration and which
-video file it appears in, so a shared clip can still be traced back.
+Photo file names lead with the carrier — `SMSA - 283255858.jpg` — so a folder
+sorts by courier at a glance, and the same name is used whether you save to the
+phone or upload. The stocktake is named for the day and the batch:
+`جرد الكميات - 10 Sep - 44 طلب - 9 منتج.xlsx`.
 
 It needs a Google OAuth client, which only you can create:
 
@@ -202,18 +244,12 @@ It needs a Google OAuth client, which only you can create:
 4. **Credentials → Create credentials → OAuth client ID → Web application**.
    Under *Authorised JavaScript origins* add your Vercel URL
    (e.g. `https://lamlem-lite-two.vercel.app`).
-5. Copy the client ID into Vercel → **Settings → Environment Variables**:
-
-| Name | Value |
-|---|---|
-| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | `…apps.googleusercontent.com` |
-
-Redeploy. Without this variable the button stays hidden rather than failing
-when tapped.
+5. Paste the client ID into **الإعدادات → الرفع إلى Drive** in the app.
 
 The scope requested is `drive.file`, which lets the app touch **only files it
 creates itself** — it cannot read anything already in your Drive. Note that
-uploading does send packing videos, which show customer labels, to Google.
+uploading does send photos of packed boxes, which show customer labels, to
+Google.
 
 ## Installing on Android
 
@@ -236,7 +272,7 @@ npm test && npm run typecheck && npm run build
 ```
 
 The upload/parse/pack/summary flow works in a desktop browser. Barcode scanning
-and video recording need a real device.
+and photo capture need a real device.
 
 ---
 
@@ -255,29 +291,27 @@ Driven through the real UI against your real files (`Prep Orders.pdf`,
 - group session: collect 3 → record → stop → verify 3 → all marked done,
   counter 2/30 → 5/30, each row labelled *ضمن مجموعة*
 - summary shows customer names; timings and IndexedDB persistence survive reload
+- **labels-only batch**, against a real 5 Sep SMSA export whose invoice PDF has
+  zero text: the app named the cause and offered the labels-only route, which
+  produced **35 orders, 35/35 labels, 40 line items, 40/40 matched to a catalog
+  product with a photo, nothing flagged**. All 35 tracking barcodes and all 35
+  order numbers resolve to the right order, every label read as prepaid (COD 0),
+  and جرد الكميات ran on the result — 9 products, 18 components
 - **photo mode**, driven through the real UI against a synthetic camera: a group
-  session shot three boxes, each saved as its own JPEG — `DN - 276219057.jpg`,
-  640×480, real JPEG magic bytes — and scanning a box holding different contents
-  stopped before the shutter, naming *صنف إضافي: شاي ماتشا 150g*. Single mode
-  shot one order and returned home. Photos survived a reload, and a batch mixing
-  four photos with one clip listed both correctly
-- **جرد الكميات** against the same batch: 8 sold lines / 33 units over 30 orders,
-  exploded into 15 components — 27 small cartons, 76 new-design cups, 37 sticker
-  sheets, 31 free mugs cards, 29 matcha tins — each figure checked by hand
-  against your sheet. The workbook was written, read back and confirmed
-  right-to-left in both sheets. Uploading a replacement sheet in **الإعدادات**
-  reparsed to the same 51 products / 37 components.
-
-Also verified by substituting a synthetic camera (an animated canvas fed
-through `getUserMedia`), which exercises the real video pipeline:
-
-- the preview element receives frames — 640×480, `readyState 4`, sampled pixels
-  are not black — on the first open **and** on every reopen
-- the camera is acquired **once per batch** and stays live across scanner
-  open/close, so no scan waits on re-acquisition
-- recording produces a real file: a 19 KB `video/webm;codecs=vp9` clip stored in
-  IndexedDB, with the duration recorded against the order
-- **مشاهدة** plays that clip back inline (5.0s, 640×480, non-black frames)
+  session shot boxes into their own JPEGs — `SMSA - 283255858.jpg`, real JPEG
+  magic bytes — and a box holding different contents stopped before the shutter.
+  Single mode shot one order and returned home; photos survived a reload
+- **the camera recovering by itself**: the live track was stopped outright — the
+  same thing a screen lock or a phone call does — and the preview went dead.
+  Firing `visibilitychange` had the camera re-acquired within seconds (a *new*
+  stream, track `live`, frames flowing) with no reload, and the next shot was
+  captured through it
+- **جرد الكميات** against a 44-order batch: 9 sold lines / 54 units exploded
+  into 19 components — 42 small cartons, 146 new-design cups, 62 sticker sheets,
+  49 free-mug cards, 48 matcha tins, and the newly added 6 whisk sets — written,
+  read back, and confirmed right-to-left in both sheets
+- **the share split**: 40 files become four batches of ten with nothing dropped,
+  and a set that is few but heavy splits on bytes instead
 
 **Still not verified:** decoding an actual printed barcode, which needs a real
 camera pointed at a real label, and the Drive upload, which cannot run until you
@@ -294,20 +328,16 @@ inside a group session.
 - **Barcode scanning uses the browser's built-in `BarcodeDetector`**, which
   Chrome on Android supports. Safari/iOS does not; there the app shows a notice
   and you use the manual pickers.
-- **The camera opens only while the scanner is on screen**, and is released
-  again afterwards — except while a recording is running, which necessarily
-  keeps it open. The preview is hidden during packing; the scan button sits
-  where it used to be.
-- **Videos and photos live only on that phone**, in IndexedDB, unless you upload
-  them. "دفعة جديدة" deletes all of them.
+- **The camera stays open for the whole session** rather than being re-acquired
+  per scan, which used to leave the preview black for a few hundred
+  milliseconds each time. It is released on reset and on leaving the page.
+- **Photos live only on that phone**, in IndexedDB, unless you upload them.
+  "دفعة جديدة" deletes all of them. The summary shows current usage.
 - **A photo is taken at the sensor's photo resolution** where the browser
   supports `ImageCapture`, and falls back to a frame off the live preview
-  (which follows the video-quality setting) where it does not.
-- **Video is picture-only, no audio.** Fewer permissions, smaller files.
-- A group session stores **one clip shared by every order in it**; the per-order
-  time shown is the session split evenly, and the row says *ضمن مجموعة*.
-- Roughly 1.5 Mbps, so a two-minute pack is about 20 MB. The summary shows
-  current usage.
+  (which follows the resolution setting) where it does not.
+- **Old video clips are deleted** when the app first opens after this version:
+  nothing can play them any more, and they were megabytes each.
 - **Product photos are hot-linked to Salla's CDN**, so the first view of each
   needs a connection.
 - The product list is technically optional, but without it there are no photos
