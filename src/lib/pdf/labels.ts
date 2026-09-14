@@ -6,6 +6,7 @@
  */
 
 import { toAsciiDigits } from "../arabic.ts";
+import type { ShipService } from "../settings.ts";
 import { detectCarrier, type CarrierTemplate } from "../carriers.ts";
 import { reconstructText, type RawItem } from "./layout.ts";
 import { extractDescription } from "./label-contents.ts";
@@ -24,6 +25,16 @@ export interface ParsedLabel {
   codAmount?: number;
   /** Value of the goods as declared to the carrier — never money to collect. */
   declaredValue?: number;
+  /**
+   * Which shipping service the parcel went out on, when the label says.
+   *
+   * SMSA charges very differently for delivering to a door and for holding a
+   * parcel at a branch, so the profit of an order turns on this. The label
+   * states it twice — a four-letter code and a service name — and either will
+   * do: EDHD / "HAL Delivery" is home delivery, EDDL / "Delivery Lite" is
+   * branch pickup.
+   */
+  service?: ShipService;
   weight?: string;
   pieces?: number;
   /**
@@ -54,6 +65,17 @@ const RE_DV = /DV\s*[:：]\s*[A-Z]{3}\s*([\d.,]+)/i;
 const RE_WEIGHT = /(?:WGT|Weight)\s*[:：]?\s*([\d.]+\s*[A-Za-z]*)/i;
 const RE_PIECES = /(?:PCs|Pieces)\s*[:：]?\s*(\d+)/i;
 const RE_CITY_EN = /City\s*[:：]\s*([A-Za-z \-]+)/i;
+
+/** Reads the shipping service off the label, so the right tariff is applied. */
+function detectService(text: string, carrierId?: string): ShipService | undefined {
+  if (carrierId === "deliver_now") return "dn";
+  if (carrierId !== "smsa") return undefined;
+  if (/EDHD/i.test(text) || /HAL\s+Delivery|Home\s+Delivery/i.test(text)) {
+    return "smsaHome";
+  }
+  if (/EDDL/i.test(text) || /Delivery\s+Lite/i.test(text)) return "smsaPickup";
+  return undefined;
+}
 
 /**
  * Whether a line reads as a person's name.
@@ -157,6 +179,7 @@ function parseOneLabel(pageText: string, page: number): ParsedLabel {
   const codAmount =
     underHeader ?? num(text.match(RE_COD)?.[1]) ?? num(text.match(RE_DV)?.[1]);
   const declaredValue = num(text.match(RE_DV)?.[1]);
+  const service = detectService(text, carrier?.id);
   const weight = text.match(RE_WEIGHT)?.[1]?.trim();
   const pieces = num(text.match(RE_PIECES)?.[1]);
 
@@ -170,6 +193,7 @@ function parseOneLabel(pageText: string, page: number): ParsedLabel {
     city,
     codAmount,
     declaredValue,
+    service,
     weight,
     pieces: pieces === undefined ? undefined : Math.trunc(pieces),
     sourcePage: page,

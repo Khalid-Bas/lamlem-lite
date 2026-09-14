@@ -1,5 +1,7 @@
 /** Domain types for the lite app. Deliberately small. */
 
+import type { ShipService } from "./settings.ts";
+
 export interface PackItem {
   /** Display name — the catalog's spelling once linked. */
   name: string;
@@ -24,6 +26,8 @@ export interface PackOrder {
   city?: string;
   carrierName?: string;
   carrierId?: string;
+  /** Shipping service, when the label named it — decides the shipping tariff. */
+  service?: ShipService;
   trackingRaw?: string;
   paymentType: "cod" | "prepaid";
   totalAmount?: number;

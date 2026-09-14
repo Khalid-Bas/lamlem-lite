@@ -12,6 +12,15 @@ import { reconstructText, type RawItem } from "./layout.ts";
 
 export interface ParsedOrderItem {
   name: string;
+  /**
+   * The same name with the font's damage left in — «بكج اليوم الوط �».
+   *
+   * The markers are the only trace of the letters pdf.js could not decode, and
+   * the catalog can read through them to identify the product. Stripping them
+   * everywhere, as the display name does, throws that away and leaves a
+   * perfectly ordinary product looking unknown.
+   */
+  nameRaw: string;
   /** Salla's internal product id, printed in the رقم المنتج column. */
   sallaProductId?: string;
   category?: string;
@@ -180,8 +189,14 @@ function parseOneOrder(lines: string[], page: number): ParsedOrder | null {
 
       const m = line.match(RE_PRODUCT_ROW);
       if (m) {
+        // The row is matched a second time with the damage left in, purely to
+        // capture the name as the font actually rendered it. `line` has had
+        // its markers stripped by then, which is what the display name wants
+        // and what made «بكج اليوم الوط �» unrecoverable.
+        const damaged = cleanOptionLine(lines[i]).match(RE_PRODUCT_ROW);
         pending = {
           name: cleanLine(m[1]),
+          nameRaw: cleanOptionLine(damaged?.[1] ?? m[1]),
           sallaProductId: m[2],
           category: cleanLine(m[3]),
           sku: m[4],
@@ -207,6 +222,7 @@ function parseOneOrder(lines: string[], page: number): ParsedOrder | null {
       } else {
         // Long product names wrap onto the next line ("وادواتها اسود").
         pending.name = cleanLine(`${pending.name} ${line}`);
+        pending.nameRaw = cleanOptionLine(`${pending.nameRaw} ${cleanOptionLine(lines[i])}`);
       }
     }
   }

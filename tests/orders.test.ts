@@ -92,3 +92,31 @@ test("still reads the order's own fields", () => {
   assert.equal(order.city, "جدة");
   assert.equal(order.totalAmount, 157.98);
 });
+
+/* ── names the invoice font could not render ── */
+import { findProduct } from "../src/lib/build-batch.ts";
+import { DEFAULT_CATALOG } from "../src/lib/catalog-default.ts";
+
+test("keeps the font's damage on the name so the catalog can repair it", () => {
+  // Regression: «بكج اليوم الوطني» comes out of the invoice as
+  // «بكج اليوم الوط �», with no SKU in the row. Stripping the marker before
+  // matching left a real product looking unknown — no photo, no cost, and
+  // missing from the stocktake.
+  const [order] = parseOrderPages([
+    page(["بكج اليوم الوط � 120511309 جميع المنتجات --- 1"]),
+  ]);
+  assert.equal(order.items.length, 1);
+  assert.equal(order.items[0].name, "بكج اليوم الوط", "display name is cleaned");
+  assert.equal(order.items[0].nameRaw, "بكج اليوم الوط �", "the marker is kept");
+
+  const hit = findProduct({ name: order.items[0].nameRaw, sku: "---" }, DEFAULT_CATALOG);
+  assert.equal(hit?.name, "بكج اليوم الوطني");
+});
+
+test("a damaged name that fits two products is left unmatched", () => {
+  // «بكج ماتشا وادواتها أبيض» and «… اسود» differ only in the last word, so a
+  // marker there could be either. Guessing would put the wrong photo on the
+  // card, which is worse than saying nothing.
+  const hit = findProduct({ name: "بكج ماتشا وادواتها �" }, DEFAULT_CATALOG);
+  assert.equal(hit, undefined);
+});

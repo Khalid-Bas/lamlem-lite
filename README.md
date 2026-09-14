@@ -2,9 +2,9 @@
 
 A single-screen packing tool for one person with a phone.
 
-Upload the shipping-label PDF (plus the product Excel for photos) → pack the
-box → scan its label with the phone camera → see exactly what should be inside
-→ photograph the sealed box → the photo is filed under that order number.
+Upload the shipping-label PDF → pack the box → scan its label with the phone
+camera → see exactly what should be inside → photograph the sealed box → the
+photo is filed under that order number.
 
 Everything runs on the phone. No server, no account, no database, and none of
 your customer data leaves the device.
@@ -15,18 +15,41 @@ your customer data leaves the device.
 
 | | |
 |---|---|
-| **Setup** (once per batch) | Pick the **تجهيز الطلبات** PDF (optional), `polices.pdf`, and the product list (`.xlsx` or `.csv`). Parsed on-device in a few seconds, then a summary shows how many orders, labels and photos were resolved — check this before packing. |
+| **Setup** (once per batch) | Pick the **تجهيز الطلبات** PDF (optional) and `polices.pdf`. The product list is built into the app. Parsed on-device in a few seconds, then a summary shows how many orders, labels and photos were resolved — check this before packing. |
 | **Pack, then shoot** | Pack the box first. Then **تصوير طلب واحد** or **تصوير مجموعة طلبات** — one tap, straight to the camera. |
 | **Scan** | Scan the label on the sealed box. The order appears over a live viewfinder so the contents can be checked one last time. |
 | **Shoot** | Tap the shutter. The photo is saved as `SMSA - 276451900.jpg` — carrier, then order number. Group mode goes straight back to the scanner for the next box. |
 | **Summary** | Customer name, time, photo size, **عرض** to look at one in place, **حفظ** to download, and **أرسل … + الجرد إلى Drive** — available at any time, not only once the batch is finished. |
-| **Stocktake** | **جرد الكميات (Excel)** — one workbook, two sheets: what sold, and every carton, cup, sticker and tin that sale consumed. |
+| **Stocktake** | **جرد الكميات (Excel)** — one workbook, three sheets: what sold, every carton and cup that sale consumed, and what the day actually earned. |
 
 Tapping an order in **الطلبات** opens a **read-only preview** — items, photos,
 quantities — and never touches the camera. **صوّر هذا الطلب** inside it goes
 straight to the shutter for that one box, skipping the scan, for when a label
 will not read. An order that already has a photo offers to replace it, and says
 so first.
+
+## The product list is built in
+
+Names, photos, prices and cost prices ship inside the app, so a batch needs
+only the two PDFs and product photos appear with nothing to pick. The list
+changes a few times a year; re-uploading it before every batch was friction
+with no payoff.
+
+**الإعدادات → قائمة المنتجات** replaces it on the device when it does change,
+and re-links the batch already open so the new names and photos reach the
+orders on screen rather than waiting for the next one. **العودة إلى القائمة
+المضمَّنة** puts the built-in list back. To change the built-in copy:
+
+```bash
+node --experimental-strip-types scripts/make-catalog.mjs "<قائمة المنتجات محدثة.xlsx>" "<full Salla export.xlsx>"
+```
+
+Two sources because no single export carries everything: the short list has the
+current names, prices and image URLs, and the full Salla export has the **cost
+prices** and the option values (نوع الحليب, لون المق) that the short list
+drops. They are matched by SKU, and the full export is only used to fill gaps —
+including by product *name*, so a sticker sheet re-issued under a new SKU
+inherits the cost it has always had instead of reading as free.
 
 ## Which Salla export to use
 
@@ -88,21 +111,26 @@ shutter screen opens and names the reason — *صنف إضافي: ملعقة م�
 *الكمية 3 بدل 1* — offering **تخطَّ هذا الطلب** or **صوّره رغم الاختلاف**. The
 manual picker runs the same check, so choosing a box by hand cannot slip past it.
 
-In **الملخص**: **عرض** to look at a photo in place, **حفظ** to download it, and
+In **الملخص**: **عرض** to look at a photo in place, **حفظ** to download one,
+**تحميل جميع الصور** to save every one of them to the phone as its own file
+(no archive to unpack — Chrome asks once whether the site may download several,
+and they are spaced out because it drops them when they arrive too fast), and
 one button that sends every photo *and* the stocktake workbook to Drive.
 **دفعة جديدة** deletes them all.
 
 ## جرد الكميات — the stocktake
 
 **جرد الكميات (Excel)** on the home screen (and in **الملخص**) downloads one
-workbook with two sheets, covering **every order in the batch**, packed or not
-— the question is how much stock to write down, not how far the packing has
-got.
+workbook with three sheets, covering **every order in the batch**, packed or
+not — the question is how much stock to write down and what the day earned, not
+how far the packing has got. The file is named for the day and the batch:
+`جرد الكميات - 14 Sep - 10 طلب - 4 منتج.xlsx`.
 
 | Sheet | What it answers |
 |---|---|
 | **المنتجات المباعة** | What was sold: product, chosen variant, SKU, Salla id, units, and how many orders those units are spread over. |
 | **المواد المستهلكة** | What that costs the shelves: every carton, cup, sticker sheet, card and tin actually consumed. |
+| **المبيعات والأرباح** | What the day earned: one row per order with its VAT, shipping cost, cost of goods, net profit and margin, and a totals row. |
 
 The second sheet is the point. Selling one **بكج الجمعات** consumes a large
 carton, ten printed cups, four sticker sheets, a card, a matcha tin and a litre
@@ -131,12 +159,45 @@ Anything the sheet cannot cost is **named on screen and marked in the
 ملاحظة column** rather than silently dropped — a missing product, or one whose
 row has no components filled in yet.
 
+### المبيعات والأرباح — what the day actually earned
+
+Three things have to be kept apart or the answer is wrong, and the sheet keeps
+them in their own columns:
+
+- **VAT is not income.** It is collected for ZATCA and comes out of the total
+  before anything is called revenue. Everything downstream is net of VAT,
+  because that is the only basis on which revenue and cost are comparable.
+- **Shipping is charged *and* paid for.** What the customer paid is already
+  inside the order total; what the carrier bills us is a real cost and is
+  subtracted net of its own VAT, which is reclaimable.
+- **Cost of goods** is the product's cost price times the units in the box.
+
+The tariffs live in **الإعدادات → الشحن والضريبة**, so a renegotiated rate is a
+number to edit rather than a redeploy. Out of the box:
+
+| Service | Costs us | Charged |
+|---|---|---|
+| دليفر ناو | 14.00 excl. VAT | 22.98 incl. VAT |
+| سمسا — توصيل منزلي | 29.00 incl. VAT (25.22 net) | 29.99 incl. VAT |
+| سمسا — استلام من الفرع | 14.00 excl. VAT | 22.99 incl. VAT |
+
+Which SMSA tariff applies is **read off the label**, which states the service
+twice: `EDHD` / *HAL Delivery* is home delivery, `EDDL` / *Delivery Lite* is
+branch pickup. An order with no label to say — read from the invoice alone —
+is charged at home-delivery rates and the row says so, because understating a
+cost flatters the profit.
+
+A product with no cost price is **counted as zero and named**, in the row's
+ملاحظة, in the totals row, and on screen when the file downloads. The profit is
+then too high, and saying so is the whole point.
+
 Scanning is **only** active while the scanner is on screen. Once a shot is
 being framed the detector is off, so a label lying on the bench cannot jump to
 a different order.
 
 **الإعدادات** (on the main screen) holds: read the order aloud when a label
-scans, the stocktake sheet, the Drive credentials, and photo resolution —
+scans, the product list, the shipping tariffs and VAT rate, the stocktake
+sheet, the Drive credentials, and photo resolution —
 **فائقة** 1440p, **عالية** 1080p (the default), **متوازنة** 900p and
 **موفّرة** 720p. On a phone that supports `ImageCapture` the shot is taken at
 the sensor's own photo resolution and this governs the viewfinder only.
@@ -306,10 +367,15 @@ Driven through the real UI against your real files (`Prep Orders.pdf`,
   Firing `visibilitychange` had the camera re-acquired within seconds (a *new*
   stream, track `live`, frames flowing) with no reload, and the next shot was
   captured through it
-- **جرد الكميات** against a 44-order batch: 9 sold lines / 54 units exploded
-  into 19 components — 42 small cartons, 146 new-design cups, 62 sticker sheets,
-  49 free-mug cards, 48 matcha tins, and the newly added 6 whisk sets — written,
-  read back, and confirmed right-to-left in both sheets
+- **جرد الكميات** against the real 14 Sep batch: 10 orders, **11/11 line items
+  matched to a product with a photo using the built-in list and no file
+  uploaded**, exploded into 11 components, with the sales sheet reporting
+  865.10 net sales, 129.76 VAT, 162.43 shipping cost and 445.28 net profit —
+  each SMSA order charged at the tariff its own label named, three at branch
+  rates and two at home rates. Raising the Deliver Now cost from 14 to 20 in
+  الإعدادات moved the profit to 427.28, exactly 18 less across its three orders
+- **تحميل جميع الصور** saved three photos as three separate files —
+  `SMSA - 285590802.jpg`, `DN - 285628027.jpg` — with no archive
 - **the share split**: 40 files become four batches of ten with nothing dropped,
   and a set that is few but heavy splits on bytes instead
 

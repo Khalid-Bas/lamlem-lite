@@ -12,6 +12,12 @@ export interface Variant {
   imageUrl?: string;
   sku?: string;
   price?: number;
+  /**
+   * What the goods cost us, per unit, excluding VAT. Drives the profit sheet;
+   * absent for a product nobody has costed yet, which is reported rather than
+   * treated as free.
+   */
+  cost?: number;
   stock?: number;
 }
 
@@ -25,6 +31,12 @@ export interface Product {
   imageUrls: string[];
   descriptionHtml?: string;
   price?: number;
+  /**
+   * What the goods cost us, per unit, excluding VAT. Drives the profit sheet;
+   * absent for a product nobody has costed yet, which is reported rather than
+   * treated as free.
+   */
+  cost?: number;
   stock?: number;
   weight?: number;
   weightUnit?: string;

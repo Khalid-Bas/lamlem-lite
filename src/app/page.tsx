@@ -8,6 +8,10 @@ import {
 } from "@/lib/build-batch";
 import { readCatalog } from "@/lib/catalog-load";
 import {
+  activeCatalog, loadStoredCatalog, saveCatalog, clearCatalog, BUILT_IN_CATALOG,
+  type StoredCatalog,
+} from "@/lib/catalog-store";
+import {
   clearAll, formatBytes, loadBatch, loadPhoto, saveBatch, savePhoto,
   upsertRecord, usage,
 } from "@/lib/store";
@@ -23,20 +27,41 @@ import {
   cueOrderDone, cueBatchDone, speak, canSpeak,
 } from "@/lib/feedback";
 import {
-  loadSettings, saveSettings, QUALITY, DEFAULTS, type Settings as Prefs,
+  loadSettings, saveSettings, QUALITY, DEFAULTS,
+  type Settings as Prefs, type ShipService,
 } from "@/lib/settings";
-import { buildInventoryWorkbook, downloadInventory } from "@/lib/inventory/export";
+import {
+  buildInventoryWorkbook, downloadInventory, type InventoryWorkbook,
+} from "@/lib/inventory/export";
 import {
   activeBom, loadStoredBom, saveBom, clearBom, BUILT_IN_BOM, type StoredBom,
 } from "@/lib/inventory/bom-store";
 import { readBomFile } from "@/lib/inventory/bom";
 import { useBackGuard } from "@/lib/use-back-guard";
 import type { Batch, PackOrder, PackRecord } from "@/lib/types";
+import type { Product } from "@/lib/catalog-types";
 
 /** A scanned order is on screen waiting for its still photo in "photo-shoot". */
 type Mode = "setup" | "idle" | "photo-shoot";
 type ScanPurpose = "photo";
 type Flash = { kind: "bad" | "warn" | "ok"; text: string } | null;
+
+/** What the stocktake button reports back, warnings and all. */
+function inventoryMessage(out: InventoryWorkbook): string {
+  const money = (n: number) => n.toLocaleString("en", { maximumFractionDigits: 2 });
+  const parts = [
+    `تم تنزيل «${out.fileName}»`,
+    `المنتجات: ${out.soldCount} · المواد: ${out.componentCount}`,
+    `صافي المبيعات: ${money(out.netSales)} · صافي الربح: ${money(out.netProfit)} ر.س`,
+  ];
+  if (out.uncosted.length) {
+    parts.push(`الربح ناقص — بلا سعر تكلفة: ${out.uncosted.join("، ")}`);
+  }
+  if (out.unresolved.length) {
+    parts.push(`بلا مكوّنات في ملف الجرد: ${out.unresolved.join("، ")}`);
+  }
+  return parts.join(" — ");
+}
 
 export default function App() {
   const [batch, setBatch] = useState<Batch | null>(null);
@@ -104,6 +129,25 @@ export default function App() {
   previewRef.current = preview;
   sheetRef.current = sheet;
 
+  /**
+   * Re-applies the product list to the batch already open.
+   *
+   * Changing the list mid-batch has to reach the orders on screen, or the
+   * photos and names keep coming from the list that was in force when the
+   * batch was read — which is exactly the confusion the change was meant to fix.
+   */
+  const relinkBatch = useCallback(async (products: Product[]): Promise<string> => {
+    const base = batchRef.current;
+    if (!base) return "";
+    const { orders: next, withPhoto } = linkCatalog(base.orders, products);
+    const updated = { ...base, orders: next };
+    batchRef.current = updated;
+    setBatch(updated);
+    await saveBatch(updated);
+    const items = next.reduce((n, o) => n + o.items.length, 0);
+    return `${withPhoto} من ${items} صنف له صورة الآن`;
+  }, []);
+
   const updatePrefs = useCallback((patch: Partial<Prefs>) => {
     setPrefs((p) => {
       const next = { ...p, ...patch };
@@ -124,16 +168,12 @@ export default function App() {
     if (!batch) return;
     setInvMsg("جارٍ تجهيز الملف…");
     try {
-      const out = await downloadInventory(batch.orders, activeBom());
-      setInvMsg(
-        out.unresolved.length
-          ? `تم تنزيل «${out.fileName}» — المنتجات: ${out.soldCount} · المواد: ${out.componentCount}. بلا مكوّنات في ملف الجرد: ${out.unresolved.join("، ")}`
-          : `تم تنزيل «${out.fileName}» — المنتجات: ${out.soldCount} · المواد: ${out.componentCount}.`,
-      );
+      const out = await downloadInventory(batch.orders, activeBom(), activeCatalog(), prefs);
+      setInvMsg(inventoryMessage(out));
     } catch (e) {
       setInvMsg(e instanceof Error ? `تعذّر إنشاء الجرد: ${e.message}` : "تعذّر إنشاء الجرد");
     }
-  }, [batch]);
+  }, [batch, prefs]);
 
   const aliases = useMemo(
     () =>
@@ -643,6 +683,7 @@ export default function App() {
         <SettingsSheet
           prefs={prefs}
           onChange={updatePrefs}
+          onCatalogChange={relinkBatch}
           onClose={() => setSheet(null)}
         />
       )}
@@ -659,18 +700,6 @@ export default function App() {
             setBatch(null);
             setSheet(null);
             setMode("setup");
-          }}
-          onRelink={async (file) => {
-            const products = await readCatalog(file);
-            const base = batchRef.current;
-            if (!base) return "";
-            const { orders: next, withPhoto } = linkCatalog(base.orders, products);
-            const updated = { ...base, orders: next };
-            batchRef.current = updated;
-            setBatch(updated);
-            await saveBatch(updated);
-            const items = next.reduce((s, o) => s + o.items.length, 0);
-            return `${withPhoto} من ${items} صنف له صورة الآن`;
           }}
         />
       )}
@@ -978,20 +1007,18 @@ function Sheet({
 /* ══════════════ summary ══════════════ */
 
 function Summary({
-  batch, prefs, onClose, onReset, onRelink,
+  batch, prefs, onClose, onReset,
 }: {
   batch: Batch;
   prefs: Prefs;
   onClose: () => void;
   onReset: () => Promise<void>;
-  onRelink: (f: File) => Promise<string>;
 }) {
   const [store, setStore] = useState<{ used: number; quota: number } | null>(null);
   const [preview, setPreview] = useState<{ url: string; label: string } | null>(null);
   const [upload, setUpload] = useState<{ busy: boolean; msg: string }>({ busy: false, msg: "" });
-  const relinkRef = useRef<HTMLInputElement>(null);
-  const [relinkMsg, setRelinkMsg] = useState("");
   const [invMsg, setInvMsg] = useState("");
+  const [bulk, setBulk] = useState({ busy: false, done: 0, total: 0 });
   /** Batches still to hand to the share sheet, after the first tap. */
   const [queue, setQueue] = useState<{ batches: File[][]; at: number } | null>(null);
   // Probed once with a dummy file: the API is all-or-nothing per device.
@@ -1023,15 +1050,41 @@ function Summary({
     setPreview({ url: URL.createObjectURL(blob), label: photoName(r) });
   }
 
-  async function download(r: PackRecord) {
-    const blob = await loadPhoto(r.orderId);
-    if (!blob) return;
+  function saveBlob(blob: Blob, name: string) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = photoName(r);
+    a.download = name;
     a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    setTimeout(() => URL.revokeObjectURL(url), 8000);
+  }
+
+  async function download(r: PackRecord) {
+    const blob = await loadPhoto(r.orderId);
+    if (blob) saveBlob(blob, photoName(r));
+  }
+
+  /**
+   * Saves every photo to the phone, each as its own file.
+   *
+   * Not an archive: the point is having the pictures, and a zip on a phone is
+   * something to fight with before you can see anything. Chrome asks once
+   * whether the site may download several files and then lets them all
+   * through, but it drops them if they arrive too fast, so they are spaced out
+   * — which also keeps the progress honest rather than firing forty clicks
+   * into a tab and hoping.
+   */
+  async function downloadAll() {
+    const jobs = records.filter((r) => r.hasPhoto);
+    if (jobs.length === 0) return;
+    setBulk({ busy: true, done: 0, total: jobs.length });
+    for (let i = 0; i < jobs.length; i++) {
+      const blob = await loadPhoto(jobs[i].orderId);
+      if (blob) saveBlob(blob, photoName(jobs[i]));
+      setBulk({ busy: true, done: i + 1, total: jobs.length });
+      if (i < jobs.length - 1) await new Promise((r) => setTimeout(r, 350));
+    }
+    setBulk({ busy: false, done: jobs.length, total: jobs.length });
   }
 
   /**
@@ -1060,7 +1113,7 @@ function Summary({
         if (blob) out.push(new File([blob], photoName(r), { type: blob.type || "image/jpeg" }));
       }
       try {
-        const book = await buildInventoryWorkbook(batch.orders, activeBom());
+        const book = await buildInventoryWorkbook(batch.orders, activeBom(), activeCatalog(), prefs);
         if (cancelled) return;
         out.push(new File([book.blob], book.fileName, { type: book.blob.type }));
       } catch {
@@ -1165,7 +1218,7 @@ function Summary({
       // The stocktake belongs with the photos: the figures and the evidence
       // for them end up in the same folder, on the same trip.
       setUpload({ busy: true, msg: "رفع ملف الجرد…" });
-      const book = await buildInventoryWorkbook(batch.orders, activeBom());
+      const book = await buildInventoryWorkbook(batch.orders, activeBom(), activeCatalog(), prefs);
       await uploadFile(token, folderId, book.fileName, book.blob);
 
       // A manifest so a shared photo can still be traced back to its order.
@@ -1215,12 +1268,10 @@ function Summary({
               className="btn b-ghost"
               onClick={() => {
                 setInvMsg("جارٍ تجهيز الملف…");
-                void downloadInventory(batch.orders, activeBom())
+                void downloadInventory(batch.orders, activeBom(), activeCatalog(), prefs)
                   .then((out) =>
                     setInvMsg(
-                      out.unresolved.length
-                        ? `تم تنزيل «${out.fileName}» — المنتجات: ${out.soldCount} · المواد: ${out.componentCount}. بلا مكوّنات في ملف الجرد: ${out.unresolved.join("، ")}`
-                        : `تم تنزيل «${out.fileName}» — المنتجات: ${out.soldCount} · المواد: ${out.componentCount}.`,
+                      inventoryMessage(out),
                     ),
                   )
                   .catch((e: unknown) =>
@@ -1257,10 +1308,19 @@ function Summary({
                 رفع تلقائي إلى مجلد Drive (بلا حد للعدد)
               </button>
             )}
+            <button
+              className="btn b-line"
+              disabled={bulk.busy || withPhoto === 0}
+              onClick={() => void downloadAll()}
+            >
+              {bulk.busy
+                ? `جارٍ التحميل… ${bulk.done} من ${bulk.total}`
+                : `تحميل جميع الصور (${withPhoto})`}
+            </button>
+            {!bulk.busy && bulk.total > 0 && (
+              <p className="note">تم تحميل {bulk.done} صورة إلى جهازك.</p>
+            )}
             <div className="b-row">
-              <button className="btn b-line" onClick={() => relinkRef.current?.click()}>
-                ربط صور المنتجات
-              </button>
               <button
                 className="btn b-stop"
                 onClick={() => {
@@ -1279,7 +1339,6 @@ function Summary({
         </p>
 
         {!upload.busy && upload.msg && <div className="flash ok">{upload.msg}</div>}
-        {relinkMsg && <div className="flash ok">{relinkMsg}</div>}
         {shareSupported && withPhoto > SHARE_MAX_FILES && (
           <p className="note">
             المشاركة تُرسل {SHARE_MAX_FILES} ملفات في كل مرة — حدّ يفرضه المتصفح
@@ -1294,17 +1353,6 @@ function Summary({
           </p>
         )}
 
-        <input
-          ref={relinkRef}
-          type="file"
-          accept=".xlsx,.xls,.csv"
-          hidden
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            e.target.value = "";
-            if (f) void onRelink(f).then(setRelinkMsg);
-          }}
-        />
 
         <div className="list">
           {records.map((r, i) => {
@@ -1360,14 +1408,18 @@ function Summary({
 function Setup({ onReady }: { onReady: (b: Batch) => void }) {
   const [orders, setOrders] = useState<File | null>(null);
   const [labels, setLabels] = useState<File | null>(null);
-  const [catalog, setCatalog] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [catalogCount, setCatalogCount] = useState(BUILT_IN_CATALOG.length);
   const [progress, setProgress] = useState<BuildProgress | null>(null);
   const [error, setError] = useState("");
   /** The orders PDF had no text layer, so the labels-only route is offered. */
   const [noText, setNoText] = useState(false);
   const [stats, setStats] = useState<BuildStats | null>(null);
   const pending = useRef<Batch | null>(null);
+
+  // Read after mount: localStorage on the first render would not match the
+  // server-rendered markup.
+  useEffect(() => setCatalogCount(activeCatalog().length), []);
 
   /**
    * Reads the uploads.
@@ -1385,7 +1437,7 @@ function Setup({ onReady }: { onReady: (b: Batch) => void }) {
       const { batch, stats: s } = await buildBatch(
         skipOrders ? null : orders,
         labels,
-        catalog,
+        activeCatalog(),
         setProgress,
       );
       if (batch.orders.length === 0) {
@@ -1422,8 +1474,12 @@ function Setup({ onReady }: { onReady: (b: Batch) => void }) {
             accept="application/pdf" file={orders} onPick={setOrders} />
           <Picker n="٢" label="ملف البوليصات" hint="polices.pdf من شركة الشحن"
             accept="application/pdf" file={labels} onPick={setLabels} />
-          <Picker n="٣" label="ملف المنتجات" hint="xlsx أو csv — لعرض صور المنتجات"
-            accept=".xlsx,.xls,.csv,text/csv" file={catalog} onPick={setCatalog} />
+          {/* The product list is built into the app and is not asked for each
+              time. الإعدادات replaces it on the rare occasion it changes. */}
+          <p className="note">
+            قائمة المنتجات مضمَّنة في التطبيق ({catalogCount} منتجًا بصورها
+            وأسعارها) — لا حاجة لرفعها. حدّثها من الإعدادات عند تغيّرها.
+          </p>
 
           {error && <div className="err">{error}</div>}
           {noText && (
@@ -1579,10 +1635,12 @@ function Toggle({
 }
 
 function SettingsSheet({
-  prefs, onChange, onClose,
+  prefs, onChange, onCatalogChange, onClose,
 }: {
   prefs: Prefs;
   onChange: (p: Partial<Prefs>) => void;
+  /** Re-links the open batch after the product list is replaced or restored. */
+  onCatalogChange: (products: Product[]) => Promise<string>;
   onClose: () => void;
 }) {
   const speech = canSpeak();
@@ -1590,11 +1648,62 @@ function SettingsSheet({
   const [bom, setBom] = useState<StoredBom | null>(null);
   const [bomMsg, setBomMsg] = useState("");
   const bomRef = useRef<HTMLInputElement>(null);
+  const [cat, setCat] = useState<StoredCatalog | null>(null);
+  const [catMsg, setCatMsg] = useState("");
+  const catRef = useRef<HTMLInputElement>(null);
   const origin = typeof window === "undefined" ? "" : window.location.origin;
 
   // Read after mount: localStorage on the first render would not match the
   // server-rendered markup.
-  useEffect(() => setBom(loadStoredBom()), []);
+  useEffect(() => {
+    setBom(loadStoredBom());
+    setCat(loadStoredCatalog());
+  }, []);
+
+  const costed = (cat?.products ?? BUILT_IN_CATALOG).filter(
+    (p) => p.cost !== undefined,
+  ).length;
+  const catalogSize = (cat?.products ?? BUILT_IN_CATALOG).length;
+
+  /** One tariff, as three inputs on one row. */
+  const tariffRow = (key: ShipService) => {
+    const t = prefs.shipping[key];
+    const set = (patch: Partial<typeof t>) =>
+      onChange({ shipping: { ...prefs.shipping, [key]: { ...t, ...patch } } });
+    return (
+      <div className="blk-sub" key={key}>
+        <b>{t.label}</b>
+        <div className="b-row">
+          <label className="fieldlet">
+            <span>تكلفتها علينا</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              value={t.cost}
+              onChange={(e) => set({ cost: Number(e.target.value) })}
+            />
+          </label>
+          <label className="fieldlet">
+            <span>على العميل</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              value={t.charged}
+              onChange={(e) => set({ charged: Number(e.target.value) })}
+            />
+          </label>
+        </div>
+        <div className="list">
+          <Toggle
+            label="تكلفتنا شاملة الضريبة"
+            note="أطفئها إن كان السعر المتفق عليه بدون ضريبة."
+            on={t.costIncludesVat}
+            onToggle={() => set({ costIncludesVat: !t.costIncludesVat })}
+          />
+        </div>
+      </div>
+    );
+  };
 
   return (
     <Sheet title="الإعدادات" onClose={onClose}>
@@ -1610,6 +1719,91 @@ function SettingsSheet({
             onToggle={() => onChange({ voice: !prefs.voice })}
           />
         </div>
+      </div>
+
+      <div className="blk">
+        <b className="blk-title">قائمة المنتجات</b>
+        <p className="note">
+          القائمة مضمَّنة في التطبيق ولا تُرفع مع كل دفعة — الأسماء والصور
+          والأسعار وأسعار التكلفة كلها بداخلها. ارفع نسخة جديدة فقط عند تغيّر
+          المنتجات أو الأسعار.
+        </p>
+        <p className="note">
+          {cat
+            ? `المستخدمة الآن: «${cat.fileName}» — ${catalogSize} منتجًا، منها ${costed} لها سعر تكلفة.`
+            : `المستخدمة الآن: القائمة المضمَّنة — ${catalogSize} منتجًا، منها ${costed} لها سعر تكلفة.`}
+        </p>
+        {costed < catalogSize && (
+          <p className="note">
+            المنتجات بلا سعر تكلفة تُحتسب بصفر في صفحة الأرباح، فيظهر الربح
+            أعلى من الحقيقة. أضِف عمود «سعر التكلفة» في ملف المنتجات وارفعه.
+          </p>
+        )}
+        <input
+          ref={catRef}
+          type="file"
+          accept=".xlsx,.xls,.csv"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (!f) return;
+            setCatMsg("جارٍ القراءة…");
+            void readCatalog(f)
+              .then(async (products) => {
+                if (products.length === 0) {
+                  setCatMsg("لم يُقرأ أي منتج من الملف.");
+                  return;
+                }
+                setCat(saveCatalog(products, f.name));
+                const relinked = await onCatalogChange(products);
+                setCatMsg(`تم — ${products.length} منتجًا. ${relinked}`.trim());
+              })
+              .catch((err: unknown) =>
+                setCatMsg(err instanceof Error ? `تعذّرت القراءة: ${err.message}` : "تعذّرت القراءة"),
+              );
+          }}
+        />
+        <button className="btn b-line" onClick={() => catRef.current?.click()}>
+          رفع قائمة منتجات محدَّثة
+        </button>
+        {cat && (
+          <button
+            className="btn b-ghost"
+            onClick={() => {
+              clearCatalog();
+              setCat(null);
+              void onCatalogChange(BUILT_IN_CATALOG).then((r) =>
+                setCatMsg(`عادت القائمة المضمَّنة. ${r}`.trim()),
+              );
+            }}
+          >
+            العودة إلى القائمة المضمَّنة
+          </button>
+        )}
+        {catMsg && <p className="note">{catMsg}</p>}
+      </div>
+
+      <div className="blk">
+        <b className="blk-title">الشحن والضريبة — لحساب الأرباح</b>
+        <p className="note">
+          تُحسب صفحة «المبيعات والأرباح» من هذه الأرقام. غيّرها متى تغيّرت
+          أسعار شركات الشحن — بلا حاجة لإعادة نشر التطبيق.
+        </p>
+        <label className="fieldlet">
+          <span>نسبة ضريبة القيمة المضافة ٪</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            value={prefs.vatPercent}
+            onChange={(e) => onChange({ vatPercent: Number(e.target.value) })}
+          />
+        </label>
+        {(["dn", "smsaHome", "smsaPickup"] as const).map(tariffRow)}
+        <p className="note">
+          نوع شحن سمسا (منزلي أو استلام من الفرع) يُقرأ من البوليصة نفسها؛ إن
+          لم تذكره، يُحتسب على أنه توصيل منزلي وهو الأعلى تكلفة.
+        </p>
       </div>
 
       <div className="blk">

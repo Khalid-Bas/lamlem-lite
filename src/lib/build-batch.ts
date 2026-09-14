@@ -5,8 +5,7 @@ import { parseOrdersFromItems } from "./pdf/orders.ts";
 import { parseLabelsFromItems, type ParsedLabel } from "./pdf/labels.ts";
 import { readLabelContents } from "./pdf/label-contents.ts";
 import { autoMatch } from "./barcode.ts";
-import { readCatalog } from "./catalog-load.ts";
-import { resolveOption } from "./options.ts";
+import { couldBe, resolveOption } from "./options.ts";
 import { foldArabic } from "./arabic.ts";
 import type { Batch, PackItem, PackOrder } from "./types.ts";
 import type { Product } from "./catalog-types.ts";
@@ -108,13 +107,23 @@ export function findProduct(
   const exact = products.filter((p) => foldArabic(p.name) === folded);
   if (exact.length === 1) return exact[0];
 
-  // Last resort: compare with all spaces removed, so a lost space in the PDF
+  // Compare with all spaces removed, so a lost space in the PDF
   // ("استكر شيتمن قوت") still finds its product.
   const squashed = folded.replace(/\s+/g, "");
   const loose = products.filter(
     (p) => foldArabic(p.name).replace(/\s+/g, "") === squashed,
   );
-  return loose.length === 1 ? loose[0] : undefined;
+  if (loose.length === 1) return loose[0];
+
+  // Last resort: the invoice font has no glyph for some ligatures, so pdf.js
+  // hands back U+FFFD in their place — «بكج اليوم الوط �» for «بكج اليوم
+  // الوطني». The characters are not recoverable from the PDF, but the catalog
+  // knows every legal name, so the damaged string only has to identify one.
+  if (item.name.includes("�")) {
+    const fits = products.filter((p) => couldBe(item.name, p.name));
+    if (fits.length === 1) return fits[0];
+  }
+  return undefined;
 }
 
 /** Applies a catalog to already-parsed orders: names, photos, variant text. */
@@ -175,6 +184,7 @@ function ordersFromLabels(labels: ParsedLabel[], products: Product[]): PackOrder
       city: label.city,
       carrierName: label.carrierName,
       carrierId: label.carrierId,
+      service: label.service,
       trackingRaw: label.trackingRaw,
       // Only an amount the label presents as cash on delivery makes this an
       // order to collect for. A declared value is what the goods are worth,
@@ -210,14 +220,10 @@ function countNotes(orders: PackOrder[], note: string): number {
 export async function buildBatch(
   ordersPdf: File | null,
   labelsPdf: File,
-  catalogFile: File | null,
+  /** The product list, already loaded — baked in unless the device holds one. */
+  products: Product[],
   onProgress?: (p: BuildProgress) => void,
 ): Promise<{ batch: Batch; stats: BuildStats }> {
-  let products: Product[] = [];
-  if (catalogFile) {
-    onProgress?.({ stage: "قراءة ملف المنتجات", done: 0, total: 1 });
-    products = await readCatalog(catalogFile);
-  }
 
   let parsedOrders: ReturnType<typeof parseOrdersFromItems> = [];
   if (ordersPdf) {
@@ -271,7 +277,8 @@ export async function buildBatch(
     totalAmount: o.totalAmount,
     items: o.items.map((it) => ({
       name: it.name,
-      rawName: it.name,
+      // Keeps the font's damage, so the catalog can read through it.
+      rawName: it.nameRaw || it.name,
       quantity: it.quantity,
       sku: it.sku,
       sallaProductId: it.sallaProductId,
@@ -293,6 +300,9 @@ export async function buildBatch(
     order.trackingRaw = label.trackingRaw ?? order.trackingRaw;
     order.carrierName = label.carrierName ?? order.carrierName;
     order.carrierId = label.carrierId ?? order.carrierId;
+    // Only the label knows whether SMSA is delivering to the door or holding
+    // the parcel at a branch, and the two cost very different amounts.
+    order.service = label.service ?? order.service;
   }
 
   const { orders, linked, withPhoto } = linkCatalog(base, products);

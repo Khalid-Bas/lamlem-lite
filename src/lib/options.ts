@@ -43,8 +43,14 @@ function toPattern(damaged: string): RegExp | null {
   return new RegExp(`^${body}$`);
 }
 
-/** True when `damaged` could be a reading of `candidate`. */
-function fits(damaged: string, candidate: string): boolean {
+/**
+ * True when `damaged` could be a reading of `candidate`.
+ *
+ * Exported because product names suffer the same font damage as variant text:
+ * «بكج اليوم الوطني» comes out of the invoice as «بكج اليوم الوط �», and the
+ * catalog is the only place the missing letters exist.
+ */
+export function couldBe(damaged: string, candidate: string): boolean {
   const target = squash(candidate);
   const pattern = toPattern(damaged);
   if (pattern) return pattern.test(target);
@@ -77,7 +83,7 @@ function bestInGroup(
 ): Variant | null {
   const hits = group.values
     // The fragment may or may not repeat the group name, so allow both forms.
-    .filter((v) => fits(fragment, `${group.name} ${v.value}`) || fits(fragment, v.value))
+    .filter((v) => couldBe(fragment, `${group.name} ${v.value}`) || couldBe(fragment, v.value))
     // Fewest characters hidden behind a marker is the likeliest reading.
     .sort((a, b) => a.value.length - b.value.length);
   return hits[0] ?? null;
@@ -158,7 +164,7 @@ function resolveCombined(
   const walk = (gi: number, chosen: Variant[]) => {
     if (gi === groups.length) {
       const joined = chosen.map((v, i) => `${groups[i].name} ${v.value}`).join(" ");
-      if (!fits(fragment, joined)) return;
+      if (!couldBe(fragment, joined)) return;
       const len = chosen.reduce((s, v) => s + v.value.length, 0);
       const text = chosen.map((v, i) => `${groups[i].name}: ${v.value}`).join(" · ");
       if (!best || len < best.len) best = { text, len };
